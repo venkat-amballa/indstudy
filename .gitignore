@@ -2,3 +2,4 @@
 *.jpeg
 *.pth
 *.zip
+__pycache__\*

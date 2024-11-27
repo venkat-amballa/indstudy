@@ -27,6 +27,9 @@ from timm.data.constants import \
 
 from torch.amp import GradScaler, autocast
 
+import warnings
+
+warnings.simplefilter(action='ignore', category=FutureWarning)
 
 scaler = GradScaler()
 
@@ -113,13 +116,13 @@ class ISIC2018Dataset(Dataset):
 class ISIC2019Dataset(Dataset):
     def __init__(self, csv_file, img_dir, transform=None):
         df = pd.read_csv(csv_file)
+        cols_list = ["MEL", "NV", "BCC", "AK", "BKL", "DF", "VASC", "SCC", "UNK"]
         if 'label' not in df.columns:
-            df['label'] = df[df.columns[1:]].idxmax(axis=1)
-
+            df['label'] = df[cols_list].idxmax(axis=1)
         self.data = df
         self.img_dir = img_dir
         self.transform = transform
-        self.data['label_encoded'] = self.data['label'].map(label_mapping)
+        self.data['label_encoded'] = self.data['label'].str.lower().map(label_mapping)
 
     def __len__(self):
         return len(self.data)
@@ -196,7 +199,7 @@ def train_and_evaluate(loss_functions, loss_fn_name, model, train_loader, val_lo
         # Training loop
         for images, labels in train_loader:
             batch += 1
-            if batch > 3: break
+            if batch > 2: break
             if (batch + 1) % 50 == 0:
                 print("*", end="", flush=True)
 
