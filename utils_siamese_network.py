@@ -13,48 +13,56 @@ from timm.data.constants import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 from sklearn.model_selection import train_test_split
 import datetime
 import time
+from tqdm import tqdm
+import argparse
 
 warnings.filterwarnings("ignore", category=UserWarning)
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-print("Using Device:", device)
 
 # Define label mapping
-label_mapping = {
-    'nv': 0,
-    'mel': 1,
-    'bkl': 2,
-    'bcc': 3,
-    'akiec': 4,
-    'vasc': 5,
-    'df': 6
+label_mapping_isic2018 = {
+    'MEL': 0,
+    'NV': 1,
+    'BCC': 2,
+    'AKIEC': 3,
+    'BKL': 4,
+    'DF': 5,
+    'VASC': 6
 }
+DEVICE = 'cpu'
 
-class HAM10000Dataset(Dataset):
+class ISIC2018Dataset(Dataset):
     def __init__(self, csv_file, img_dir, transform=None):
-        self.data = pd.read_csv(csv_file)
+        df = pd.read_csv(csv_file)
+        if 'label' not in df.columns:
+            df['label'] = df[df.columns[1:]].idxmax(axis=1)
+
+        self.data = df
         self.img_dir = img_dir
         self.transform = transform
-        self.data['label_encoded'] = self.data['dx'].map(label_mapping)
+        self.data['label_encoded'] = self.data['label'].map(label_mapping_isic2018)
 
     def __len__(self):
         return len(self.data)
 
     def __getitem__(self, idx):
-        img_name = os.path.join(self.img_dir, self.data.iloc[idx, 1] + '.jpg')
+        img_name = os.path.join(self.img_dir, self.data.iloc[idx, 0] + '.jpg')
         image = Image.open(img_name).convert('RGB')
-        label = torch.tensor(self.data.iloc[idx, -1], dtype=torch.long)
+        label = torch.tensor(self.data.loc[idx, "label_encoded"], dtype=torch.long)
         if self.transform:
             image = self.transform(image)
         return image, label
-
-
+    
 # Triplet Dataset Class
-class TripletHAM10000Dataset(Dataset):
+class TripletISIC2018Dataset(Dataset):
     def __init__(self, csv_file, img_dir, transform=None):
-        self.data = pd.read_csv(csv_file)
+        df = pd.read_csv(csv_file)
+        if 'label' not in df.columns:
+            df['label'] = df[df.columns[1:]].idxmax(axis=1)
+
+        self.data = df
         self.img_dir = img_dir
         self.transform = transform
-        self.data['label_encoded'] = self.data['dx'].map(label_mapping)
+        self.data['label_encoded'] = self.data['label'].map(label_mapping_isic2018)
         
     def __len__(self):
         return len(self.data)
@@ -67,9 +75,9 @@ class TripletHAM10000Dataset(Dataset):
         positive = pos_candidates.sample(1).iloc[0]
         negative = neg_candidates.sample(1).iloc[0]
 
-        anchor_img = self._load_image(anchor['image_id'])
-        positive_img = self._load_image(positive['image_id'])
-        negative_img = self._load_image(negative['image_id'])
+        anchor_img = self._load_image(anchor['image'])
+        positive_img = self._load_image(positive['image'])
+        negative_img = self._load_image(negative['image'])
 
         return anchor_img, positive_img, negative_img
 
@@ -99,7 +107,8 @@ class ContrastiveLoss(nn.Module):
 def train_triplet_network(model, train_loader, val_loader, optimizer, loss_fn, 
                           RESULTS_PTH, 
                           num_epochs=10, 
-                          checkpoint_path="triplet_best_model.pth"):
+                          checkpoint_path="triplet_best_model.pth",
+                          device=DEVICE):
     
     best_loss = float('inf')
     start_epoch = 0
@@ -113,16 +122,10 @@ def train_triplet_network(model, train_loader, val_loader, optimizer, loss_fn,
         print(f"Resuming training from epoch {start_epoch + 1} with best loss: {best_loss:.4f}")
 
     results = {'epoch':[], 'loss':[], 'val_loss':[]}
-    for epoch in range(start_epoch, num_epochs):
+    for epoch in tqdm(range(start_epoch, num_epochs)):
         model.train()
         running_loss = 0.0
-        batch = 0
-        for anchor, positive, negative in train_loader:
-            batch += 1
-            # if batch > 3: break
-            if (batch + 1) % 10 == 0:
-                print("*", end="", flush=True)
-            
+        for anchor, positive, negative in tqdm(train_loader):
             anchor, positive, negative = anchor.to(device), positive.to(device), negative.to(device)
             optimizer.zero_grad()
             
@@ -139,7 +142,7 @@ def train_triplet_network(model, train_loader, val_loader, optimizer, loss_fn,
         results['epoch'] = epoch+1
         results['loss'].append(avg_loss)
         results['val_loss'].append(val_loss)
-        print("\r", end="")
+
         if not os.path.exists(RESULTS_PTH):
             results_df = pd.DataFrame({'epoch':[], 'loss':[], 'val_loss':[]})
         else:
@@ -148,8 +151,6 @@ def train_triplet_network(model, train_loader, val_loader, optimizer, loss_fn,
         results_df.loc[len(results_df)] = [epoch+1, avg_loss, val_loss]
             
         results_df.to_csv(RESULTS_PTH, index=False)
-    
-        # print(f"Results saved to {RESULTS_PTH}")
 
         print(f"Epoch [{epoch + 1}/{num_epochs}], Loss: {avg_loss:.4f}")
 
@@ -165,19 +166,15 @@ def train_triplet_network(model, train_loader, val_loader, optimizer, loss_fn,
 
     return results
 
-def generate_reference_embeddings(model, data_loader):
+def generate_reference_embeddings(model, data_loader, device=DEVICE):
     """
     Generate and save the average embedding vector for each label (class).
     """
     model.eval()
     all_embeddings = []
     all_labels = []
-    i = 0
     with torch.no_grad():
-        for images, labels in data_loader:    
-            i+= 1
-            if i>4:
-                break
+        for images, labels in tqdm(data_loader):    
             images, labels = images.to(device), labels.to(device)
 
             batch_embeddings = model(images)  # (batch_size, embedding_size)
@@ -197,7 +194,7 @@ def generate_reference_embeddings(model, data_loader):
 
     return label_embeddings
 
-def predict_class(model, data_loader, reference_embeddings):
+def predict_class(model, data_loader, reference_embeddings, device=DEVICE):
     """
     function to predict the class of each image in data_loader
     by finding the nearest reference embedding.
@@ -220,7 +217,7 @@ def predict_class(model, data_loader, reference_embeddings):
             # compute pairwise distances in batch
             distances = torch.cdist(batch_embeddings, ref_embeddings)
             
-            # Get the predicted label and corresponding distance for each image
+            # min distance and corresponding label for each image
             min_distances, min_indices = distances.min(dim=1)
             for i in range(len(images)):
                 predicted_label = labels[min_indices[i].item()]
@@ -232,7 +229,7 @@ def predict_class(model, data_loader, reference_embeddings):
 
 
 
-def evaluate_triplet_network(model, loss_fn, data_loader):
+def evaluate_triplet_network(model, loss_fn, data_loader, device=DEVICE):
     model.eval()
     running_loss = 0.0
 
