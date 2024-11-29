@@ -11,7 +11,7 @@ from utils_siamese_network import *
 import timm
 
 # Constants and Hyperparameters
-UID = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+
 DATASET_DIR = 'datasets'
 BATCH_SIZE = 32
 EPOCHS = 50
@@ -22,11 +22,6 @@ LOSS_FN_NAME = f'-mean-std-interpol-constrastiveloss{CHANGES}'
 loss_fn = ContrastiveLoss(margin=2)
 
 EXPERIMENT_DIR = os.path.join(f'triplet_{MODEL_TYPE}{CHANGES}')
-CHECKPOINT_PATH = os.path.join(EXPERIMENT_DIR, f"triplet_best_model_{UID}.pth")
-RESULTS_PTH = os.path.join(EXPERIMENT_DIR, f"results_{MODEL_TYPE}_{LOSS_FN_NAME}_{UID}.csv")
-
-PREDICTIONS_PTH = os.path.join(EXPERIMENT_DIR, f"predictions_{MODEL_TYPE}_{UID}.csv")
-REPORT_PTH = os.path.join(EXPERIMENT_DIR, f"predictions_{MODEL_TYPE}_{UID}.txt")
 
 # Paths for dataset files
 METADATA_FILE_PTH = os.path.join(DATASET_DIR, 'HAM10000_metadata.csv')
@@ -39,10 +34,6 @@ VAL_GROUND_TRUTH_PTH = os.path.join(DATASET_DIR, 'ISIC2018_Task3_Validation_Grou
 
 TEST_IMAGES_DIR = os.path.join(DATASET_DIR, 'ISIC2018_Task3_Test_Input')
 TEST_GROUND_TRUTH_PTH = os.path.join(DATASET_DIR, 'ISIC2018_Task3_Test_GroundTruth.csv')
-
-parser = argparse.ArgumentParser(description="args")
-parser.add_argument("-e", "--epochs", type=int, help="number of epochs")
-args = parser.parse_args()
 
 # Define transformations
 train_transforms = transforms.Compose([
@@ -86,11 +77,32 @@ test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False, num
 
 # Model initialization
 def main():
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print("Using Device:", device)
+        ################ PARSER #############################
+    parser = argparse.ArgumentParser(description="args")
+    parser.add_argument("-e", "--epochs", type=int, help="number of epochs")
+    parser.add_argument("-d", "--device", type=str, help="device to use(cpu/cuda)")
+    parser.add_argument("-lr", "--learning_rate", type=float, help="learning rate to use")
+    parser.add_argument("-uid", "--uid", type=str, help="uid of the previous run, pass this to resume the training")
 
-    model = timm.create_model(MODEL_TYPE, pretrained=True, num_classes=0).to(device)
-    optimizer = optim.Adam(model.parameters(), lr=1e-4, weight_decay=1e-7)
+    args = parser.parse_args()
+
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    EPOCHS = args.epochs if args.epochs else 50 
+    DEVICE = args.device if args.device else device
+    LR = args.learning_rate if args.learning_rate else 1e-5
+    UID = args.uid if args.uid else datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+    print("Using Device:", DEVICE)
+
+    CHECKPOINT_PATH = os.path.join(EXPERIMENT_DIR, f"triplet_best_model_{UID}.pth")
+    RESULTS_PTH = os.path.join(EXPERIMENT_DIR, f"results_{MODEL_TYPE}_{LOSS_FN_NAME}_{UID}.csv")
+
+    PREDICTIONS_PTH = os.path.join(EXPERIMENT_DIR, f"predictions_{MODEL_TYPE}_{UID}.csv")
+    REPORT_PTH = os.path.join(EXPERIMENT_DIR, f"predictions_{MODEL_TYPE}_{UID}.txt")
+
+
+    model = timm.create_model(MODEL_TYPE, pretrained=True, num_classes=0).to(DEVICE)
+    optimizer = optim.Adam(model.parameters(), lr=1e-4, weight_decay=1e-6)
 
     # Training and evaluation
     start_time = time.time()
@@ -99,7 +111,7 @@ def main():
                                         RESULTS_PTH,
                                         num_epochs=EPOCHS, 
                                         checkpoint_path=CHECKPOINT_PATH,
-                                        device=device
+                                        device=DEVICE
                                         )
 
     # test_loss = evaluate_triplet_network(model, loss_fn, test_loader)
@@ -115,8 +127,8 @@ def main():
     optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
 
     # Generate reference embeddings and predictions
-    reference_embeddings = generate_reference_embeddings(model, train_loader, device=device)
-    predictions = predict_class(model, test_loader, reference_embeddings, device=device)
+    reference_embeddings = generate_reference_embeddings(model, train_loader, device=DEVICE)
+    predictions = predict_class(model, test_loader, reference_embeddings, device=DEVICE)
 
     # Save predictions
     predictions_df = pd.DataFrame(predictions)

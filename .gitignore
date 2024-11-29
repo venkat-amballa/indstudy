@@ -2,4 +2,8 @@
 *.jpeg
 *.pth
 *.zip
+*.txt
 __pycache__/*
+runs/*
+tracker.md
+snippets.__pycache__

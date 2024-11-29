@@ -124,8 +124,12 @@ def train_triplet_network(model, train_loader, val_loader, optimizer, loss_fn,
     results = {'epoch':[], 'loss':[], 'val_loss':[]}
     for epoch in tqdm(range(start_epoch, num_epochs)):
         model.train()
+        batch = 0
         running_loss = 0.0
         for anchor, positive, negative in tqdm(train_loader):
+            # batch += 1
+            # if batch > 3:
+            #     break
             anchor, positive, negative = anchor.to(device), positive.to(device), negative.to(device)
             optimizer.zero_grad()
             
@@ -137,7 +141,7 @@ def train_triplet_network(model, train_loader, val_loader, optimizer, loss_fn,
             running_loss += loss.item()
 
         avg_loss = running_loss / len(train_loader)
-        val_loss = evaluate_triplet_network(model, loss_fn, val_loader)
+        val_loss = evaluate_triplet_network(model, loss_fn, val_loader, device=device)
 
         results['epoch'] = epoch+1
         results['loss'].append(avg_loss)

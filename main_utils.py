@@ -21,6 +21,7 @@ import datetime
 import time
 import sys
 import argparse
+from tqdm import tqdm
 
 from timm.data.constants import \
     IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
@@ -33,9 +34,7 @@ warnings.simplefilter(action='ignore', category=FutureWarning)
 
 scaler = GradScaler()
 
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-print("Using Device:",device)
-
+DEVICE = 'cpu'
 # Define label mapping
 label_mapping_ham = {
     
@@ -146,9 +145,10 @@ class FocalLoss(nn.Module):
         self.ce = nn.CrossEntropyLoss()
 
     def forward(self, inputs, targets):
-        ce_loss = self.ce(inputs, targets)
+        ce_loss = self.ce(inputs, targets) # , reduction='none')
         pt = torch.exp(-ce_loss)
         focal_loss = self.alpha * (1 - pt) ** self.gamma * ce_loss
+        # return focal_loss.mean() if self.reduction == 'mean' else focal_loss.sum()
         return focal_loss
 
 
@@ -176,7 +176,9 @@ def train_and_evaluate(loss_functions, loss_fn_name, model, train_loader, val_lo
                        RESULTS_PTH, REPORT_PTH, 
                        num_epochs=10,
                        checkpoint_path="best_model.pth",
-                       writer = None):
+                       writer = None,
+                       device = DEVICE,
+                       skip_batches=False):
     start_epoch = 0
     best_val_accuracy = 0.0
 
@@ -188,21 +190,22 @@ def train_and_evaluate(loss_functions, loss_fn_name, model, train_loader, val_lo
         best_val_accuracy = checkpoint['best_val_accuracy']
         print(f"Resuming training from epoch {start_epoch + 1} with best validation accuracy: {best_val_accuracy:.4f}")
 
-    criterion = loss_functions[loss_fn_name]
-    results = {'epoch': [], 'train_loss': [], 'train_f1': [], 'train_accuracy': [], 'val_f1': [], 'val_accuracy': []}
+    # results = {'epoch': [], 'train_loss': [], 'train_f1': [], 'train_accuracy': [], 'val_f1': [], 'val_accuracy': []}
+    # results_df = pd.DataFrame(results)
+    # if os.path.exists(RESULTS_PTH):
+    #     results_df = pd.read_csv(RESULTS_PTH)
 
-    for epoch in range(start_epoch, num_epochs):
+    criterion = loss_functions[loss_fn_name]
+    
+    for epoch in tqdm(range(start_epoch, num_epochs)):
         model.train()
         running_loss = 0.0
         all_preds, all_labels = [], []
-        batch = 0
         # Training loop
-        for images, labels in train_loader:
-            batch += 1
-            if batch > 2: break
-            if (batch + 1) % 50 == 0:
-                print("*", end="", flush=True)
-
+        for batch_idx, (images, labels) in enumerate(tqdm(train_loader)):
+            if skip_batches and batch_idx>3:
+                print("Skipping batches for testing")
+                break
             images, labels = images.to(device), labels.to(device)
             optimizer.zero_grad()
             
@@ -215,44 +218,47 @@ def train_and_evaluate(loss_functions, loss_fn_name, model, train_loader, val_lo
             _, predicted = torch.max(outputs, 1)
             all_preds.extend(predicted.cpu().numpy())
             all_labels.extend(labels.cpu().numpy())
+            if writer:
+                writer.add_scalar(f"{loss_fn_name}/Batch_Loss", loss.item(), epoch*len(train_loader) +batch_idx)
         
         # Calculate training metrics
         train_loss = running_loss / len(train_loader)
         train_f1 = f1_score(all_labels, all_preds, average='weighted', zero_division=1)
         train_accuracy = accuracy_score(all_labels, all_preds)
 
+        # Evaluate on validation data
+        val_f1, val_accuracy = evaluate_model(model, val_loader, 
+                                              REPORT_PTH, 
+                                              device=device)
         if writer:
-            # Log training metrics to TensorBoard
+            # Log training metrics 
             writer.add_scalar(f'{loss_fn_name}/Train_Loss', train_loss, epoch)
             writer.add_scalar(f'{loss_fn_name}/Train_F1', train_f1, epoch)
             writer.add_scalar(f'{loss_fn_name}/Train_Accuracy', train_accuracy, epoch)
 
-        # Evaluate on validation data
-        val_f1, val_accuracy = evaluate_model(model, val_loader, REPORT_PTH)
-        if writer:
-            # Log validation metrics to TensorBoard
-            writer.add_scalar(f'{loss_fn_name}/Val_F1', val_f1, epoch)
-            writer.add_scalar(f'{loss_fn_name}/Val_Accuracy', val_accuracy, epoch)
+            # Log validation metrics 
+            writer.add_scalar(f'{loss_fn_name}/Validation_F1', val_f1, epoch)
+            writer.add_scalar(f'{loss_fn_name}/Validation_Accuracy', val_accuracy, epoch)
 
-        # Log metrics to results
-        results['epoch'].append(epoch + 1)
-        results['train_loss'].append(train_loss)
-        results['train_f1'].append(train_f1)
-        results['train_accuracy'].append(train_accuracy)
-        results['val_f1'].append(val_f1)
-        results['val_accuracy'].append(val_accuracy)
-        print("\r", end="")
+        # # Log metrics to results
+        # results['epoch'].append(epoch + 1)
+        # results['train_loss'].append(train_loss)
+        # results['train_f1'].append(train_f1)
+        # results['train_accuracy'].append(train_accuracy)
+        # results['val_f1'].append(val_f1)
+        # results['val_accuracy'].append(val_accuracy)
+
         print(f"[{loss_fn_name}] Epoch [{epoch + 1}/{num_epochs}], "
               f"Train Loss: {train_loss:.7f}, Train Accuracy: {train_accuracy:.4f}, Train F1: {train_f1:.4f}, "
               f"Val F1: {val_f1:.4f}, Val Accuracy: {val_accuracy:.4f}")
-        if not os.path.exists(RESULTS_PTH):
-            results_df = pd.DataFrame({'epoch': [], 'train_loss': [], 'train_f1': [], 'train_accuracy': [], 'val_f1': [], 'val_accuracy': []})
-        else:
-            results_df = pd.read_csv(RESULTS_PTH)
+        # if not os.path.exists(RESULTS_PTH):
+        #     results_df = pd.DataFrame({'epoch': [], 'train_loss': [], 'train_f1': [], 'train_accuracy': [], 'val_f1': [], 'val_accuracy': []})
+        # else:
+        #     results_df = pd.read_csv(RESULTS_PTH)
     
-        results_df.loc[len(results_df)] = [epoch+1, train_loss, train_f1, train_accuracy, val_f1, val_accuracy]
+        # results_df.loc[len(results_df)] = [epoch+1, train_loss, train_f1, train_accuracy, val_f1, val_accuracy]
             
-        results_df.to_csv(RESULTS_PTH, index=False)
+        # results_df.to_csv(RESULTS_PTH, index=False)
         # Save the best model
         if val_accuracy > best_val_accuracy:
             best_val_accuracy = val_accuracy
@@ -263,20 +269,19 @@ def train_and_evaluate(loss_functions, loss_fn_name, model, train_loader, val_lo
                 'best_val_accuracy': best_val_accuracy
             }, checkpoint_path)
             print(f"New best model saved with validation accuracy: {best_val_accuracy:.4f}")
-    if writer:
-        writer.flush()
-        writer.close()
-    return results_df
-
+    # if writer:
+    #     writer.flush()
+    #     writer.close()
+    # return results_df
 
 
 # Evaluation function for validation/test F1 score and Accuracy
-def evaluate_model(model, data_loader, REPORT_PTH):
+def evaluate_model(model, data_loader, REPORT_PTH, device = DEVICE):
     model.eval()
     all_preds, all_labels = [], []
     with torch.no_grad():
         for images, labels in data_loader:
-            images, labels = images.to(device), labels.to(device)
+            images, labels = images.to(device), labels.to(device)   
             outputs = model(images)
             _, predicted = torch.max(outputs, 1)
             all_preds.extend(predicted.cpu().numpy())
@@ -286,8 +291,8 @@ def evaluate_model(model, data_loader, REPORT_PTH):
     f1 = f1_score(all_labels, all_preds, average='weighted', zero_division=1)
     accuracy = accuracy_score(all_labels, all_preds)
     print("evaluted accuracy:", accuracy)
-    with open(REPORT_PTH, 'w') as fp:
-        fp.write(f"Accuracy: {accuracy:.4f}\n")    
-        fp.write(classification_report(all_labels, all_preds, zero_division=1))
+    # with open(REPORT_PTH, 'w') as fp:
+    #     fp.write(f"Accuracy: {accuracy:.4f}\n")    
+    #     fp.write(classification_report(all_labels, all_preds, zero_division=1))
 
     return f1, accuracy
