@@ -206,7 +206,7 @@ def optimized_training_loop(model, train_loader, optimizer):
     starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
     
     # Automated mixed precision
-    scaler = torch.cuda.amp.GradScaler()
+    scaler = torch.amp.GradScaler()
     
     for epoch in range(num_epochs):
         # Performance tracking
