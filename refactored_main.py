@@ -227,13 +227,13 @@ def main():
             "loss_fn": "CrossEntropy",
             "optimizer": "Adam",
             "hyperparams": {
-                "epochs": 2,
+                "epochs": 20,
                 "device": DEVICE,
                 "optimizer_params": {"lr": 5e-4},
                 "batch_size": 64,
             },
             # "skip": True,
-            "lr_find": True,
+            # "lr_find": True,
             "info": INFO,
             # "UID": "20241129_145429"
         },
@@ -242,7 +242,7 @@ def main():
             "loss_fn": "CrossEntropy",
             "optimizer": "Adam",
             "hyperparams": {
-                "epochs": 2,
+                "epochs": 20,
                 "device": DEVICE,
                 "optimizer_params": {"lr": 5e-4},
                 "batch_size": 64,
