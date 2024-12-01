@@ -39,6 +39,12 @@ LABEL_MAPPING_ISIC2019 = {
     'mel': 0, 'nv': 1, 'bcc': 2, 'ak': 3, 'bkl': 4, 'df': 5, 'vasc': 6, 'scc': 7, 'unk': 8
 }
 
+# Augmentation helpers
+class ImageFusion:
+    def __call__(self, img1, img2):
+        alpha = 0.5  # blending ratio
+        return Image.blend(img1, img2, alpha)
+
 # Dataset Classes
 class HAM10000Dataset(Dataset):
     """Dataset for HAM10000."""

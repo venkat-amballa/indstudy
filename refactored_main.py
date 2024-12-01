@@ -3,6 +3,9 @@ import torchvision
 from torch.utils.tensorboard import SummaryWriter
 from torch_lr_finder import LRFinder
 import matplotlib.pyplot as plt
+import cv2
+from PIL import Image
+import numpy as np
 
 NUM_CLASSES = 7
 BATCH_SIZE = 64
@@ -17,11 +20,42 @@ loss_functions = {
     # 'F1Loss': F1Loss(),
 }
 
+def convert_to_hsv(img):
+    """Converts a PIL image to HSV using OpenCV."""
+    img = np.array(img)  # Convert PIL to numpy
+    img_hsv = cv2.cvtColor(img, cv2.COLOR_RGB2HSV)
+    return Image.fromarray(img_hsv)
 
 def get_transforms():
     """Define data preprocessing transformations."""
+    # # 1. Median filtering/ guassian filtering
+    # # MedianFiltering()
+    
+
+    # # 3 . Color space hsv or LAB or RGB (select them randomly while training)
+    # transforms.Lambda(lambda img: img.convert('HSV'))
+    # transforms.Lambda(lambda img: Image.fromarray(cv2.cvtColor(np.array(img), cv2.COLOR_RGB2LAB)))
+    
+    # # 6. Randomcrop
+    # transforms.RandomCrop(200),
+    # transforms.Resize((224, 224)),
+
+    # # 2. Contrast enhancement
+
+
+    # # RandomEqualize - Equalizes image histograms to enhance contrast.
+    # transforms.RandomEqualize(),
+    # # RandomErasing  - Erases random regions to improve robustness.
+    # transforms.RandomErasing(p=0.2), 
+
+    # # 5. mixup - Combines two images using a weighted average
+
+    # # 4. Image Fusion - Overlaying two images to produce more data points.
+    # # SoftAugementation (CVPR, 2023)
+
     train_transforms = transforms.Compose([
         transforms.Resize((224, 224), interpolation=transforms.InterpolationMode.BICUBIC),
+        transforms.Lambda(lambda img: convert_to_hsv(img)),  # Convert to HSV
         transforms.RandomHorizontalFlip(),
         transforms.RandomVerticalFlip(),
         transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.1),
@@ -215,26 +249,26 @@ def main():
                 "optimizer_params": {"lr": 5e-4},
                 "batch_size": 64,
             },
-            "skip": True,
+            # "skip": True,
             "lr_find": True,
             # "info": "gradient_accumulation"
             # "UID": "20241129_145429"
         },
-        {    
-            "model_type": "resnet50",
-            "loss_fn": "CrossEntropy",
-            "optimizer": "Adam",
-            "hyperparams": {
-                "epochs": 20,
-                "device": DEVICE,
-                "optimizer_params": {"lr": 5e-4},
-                "batch_size": 64,
-            },
-            # "info": "gradient_accumulation"
-            # "skip": False,
-            # "lr_find": True,
-            "UID": "20241130_023847"
-        },
+        # {    
+        #     "model_type": "resnet50",
+        #     "loss_fn": "CrossEntropy",
+        #     "optimizer": "Adam",
+        #     "hyperparams": {
+        #         "epochs": 20,
+        #         "device": DEVICE,
+        #         "optimizer_params": {"lr": 5e-4},
+        #         "batch_size": 64,
+        #     },
+        #     # "info": "gradient_accumulation"
+        #     # "skip": False,
+        #     # "lr_find": True,
+        #     "UID": "20241130_023847"
+        # },
     ]
 
     # Get data loaders
