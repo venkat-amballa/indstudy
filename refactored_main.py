@@ -6,6 +6,8 @@ import matplotlib.pyplot as plt
 import cv2
 from PIL import Image
 import numpy as np
+from sklearn.utils.class_weight import compute_class_weight
+import numpy as np
 
 NUM_CLASSES = 7
 BATCH_SIZE = 64
@@ -73,7 +75,7 @@ def get_transforms():
     return train_transforms, test_transforms
 
 
-def get_dataloaders(dataset_dir, batch_size, train_transforms, test_transforms, num_workers=NUM_WORKERS):
+def get_dataloaders(dataset_dir, batch_size, train_transforms, test_transforms, num_workers=NUM_WORKERS, required_labels=False):
     """Create datasets and dataloaders."""
     train_dataset = ISIC2018Dataset(
         csv_file=os.path.join(dataset_dir, 'ISIC2018_Task3_Training_GroundTruth.csv'),
@@ -103,6 +105,10 @@ def get_dataloaders(dataset_dir, batch_size, train_transforms, test_transforms, 
     val_loader = DataLoader(val_dataset, shuffle=False, **args)
     test_loader = DataLoader(test_dataset, shuffle=False, **args)
 
+    if required_labels:
+        labels = train_dataset.data['label_encoded'].tolist()
+        return train_loader, val_loader, test_loader, labels
+    
     return train_loader, val_loader, test_loader
 
 
@@ -119,10 +125,8 @@ def initialize_writer(experiment_name, uid):
     log_dir = f"runs/{experiment_name}_{uid}"
     return SummaryWriter(log_dir=log_dir)
 
-def get_class_weights():
-    
-    pass
-def run_experiment(experiment, train_loader, val_loader, test_loader):
+
+def run_experiment(experiment, loss_functions, train_loader, val_loader, test_loader):
     """Run a single experiment."""
     model_type = experiment["model_type"]
     loss_fn_name = experiment["loss_fn"]
@@ -223,22 +227,44 @@ def main():
     """Main function to run multiple experiments."""
     # Define experiments
     DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
+    INFO = "class_weights"
+
+
+    # Get data loaders
+    train_transforms, test_transforms = get_transforms()
+    train_loader, val_loader, test_loader, labels = get_dataloaders(DATASET_DIR, BATCH_SIZE, 
+                                                            train_transforms, 
+                                                            test_transforms, 
+                                                            required_labels=True)
+
+    print(len(labels))
+    class_weights = compute_class_weight('balanced', classes=np.unique(labels), y=labels)
+    class_weights = torch.tensor(class_weights, dtype=torch.float).to(DEVICE)
+
+    loss_functions = {
+        'CrossEntropy': nn.CrossEntropyLoss(weight=class_weights),
+        'FocalLoss': FocalLoss(alpha=1, gamma=2),
+        'LabelSmoothing': LabelSmoothingLoss(smoothing=0.1),
+        # 'TverskyLoss': TverskyLoss(alpha=0.7, beta=0.3),
+        # 'F1Loss': F1Loss(),
+    }
+
     experiments = [
-        {
-            "model_type": "efficientnet_b0",
-            "loss_fn": "CrossEntropy",
-            "optimizer": "AdamW",
-            "hyperparams": {
-                "epochs": 20,
-                "device": DEVICE,
-                "optimizer_params": {"lr": 1e-4, "weight_decay": 1e-6},
-                "batch_size": 64,
-            },
-            "skip": True,
-            "lr_find": True,
-            # "info": "gradient_accumulation"
-            # "UID": "20241129_143457"
-        },
+        # {
+        #     "model_type": "efficientnet_b0",
+        #     "loss_fn": "CrossEntropy",
+        #     "optimizer": "AdamW",
+        #     "hyperparams": {
+        #         "epochs": 20,
+        #         "device": DEVICE,
+        #         "optimizer_params": {"lr": 1e-4, "weight_decay": 1e-6},
+        #         "batch_size": 64,
+        #     },
+        #     # "skip": True,
+        #     "lr_find": True,
+        #     "info": INFO,
+        #     # "UID": "20241129_143457"
+        # },
         {   # best 87% testing acc
             "model_type": "efficientnet_b0",
             "loss_fn": "CrossEntropy",
@@ -250,30 +276,27 @@ def main():
                 "batch_size": 64,
             },
             # "skip": True,
-            "lr_find": True,
-            # "info": "gradient_accumulation"
+            # "lr_find": True,
+            "info": INFO,
             # "UID": "20241129_145429"
         },
-        # {    
-        #     "model_type": "resnet50",
-        #     "loss_fn": "CrossEntropy",
-        #     "optimizer": "Adam",
-        #     "hyperparams": {
-        #         "epochs": 20,
-        #         "device": DEVICE,
-        #         "optimizer_params": {"lr": 5e-4},
-        #         "batch_size": 64,
-        #     },
-        #     # "info": "gradient_accumulation"
-        #     # "skip": False,
-        #     # "lr_find": True,
-        #     "UID": "20241130_023847"
-        # },
+        {    
+            "model_type": "resnet50",
+            "loss_fn": "CrossEntropy",
+            "optimizer": "Adam",
+            "hyperparams": {
+                "epochs": 20,
+                "device": DEVICE,
+                "optimizer_params": {"lr": 5e-4},
+                "batch_size": 64,
+            },
+            "info": INFO,
+            # "skip": False,
+            # "lr_find": True,
+            "UID": "20241130_023847"
+        },
     ]
 
-    # Get data loaders
-    train_transforms, test_transforms = get_transforms()
-    train_loader, val_loader, test_loader = get_dataloaders(DATASET_DIR, BATCH_SIZE, train_transforms, test_transforms)
 
     # Run each experiment
     for experiment in experiments:
@@ -281,7 +304,7 @@ def main():
             print(f"---Skipping experiment-->: {experiment['model_type']} with {experiment['loss_fn']}")
         else:
             print(f"Running experiment: {experiment['model_type']} with {experiment['loss_fn']}")
-            run_experiment(experiment, train_loader, val_loader, test_loader)
+            run_experiment(experiment, loss_functions, train_loader, val_loader, test_loader)
             
 
 if __name__ == "__main__":
