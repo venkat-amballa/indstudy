@@ -28,6 +28,12 @@ def convert_to_hsv(img):
     img_hsv = cv2.cvtColor(img, cv2.COLOR_RGB2HSV)
     return Image.fromarray(img_hsv)
 
+def convert_to_lab(img):
+    """Converts a PIL image to LAB using OpenCV."""
+    img = np.array(img)  # Convert PIL to numpy
+    img_hsv = cv2.cvtColor(img, cv2.COLOR_RGB2LAB)
+    return Image.fromarray(img_hsv)
+
 def get_transforms():
     """Define data preprocessing transformations."""
     # # 1. Median filtering/ guassian filtering
@@ -57,7 +63,7 @@ def get_transforms():
 
     train_transforms = transforms.Compose([
         transforms.Resize((224, 224), interpolation=transforms.InterpolationMode.BICUBIC),
-        transforms.Lambda(lambda img: convert_to_hsv(img)),  # Convert to HSV
+        transforms.Lambda(convert_to_lab),  # Convert to HSV
         transforms.RandomHorizontalFlip(),
         transforms.RandomVerticalFlip(),
         transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.1),
@@ -227,7 +233,7 @@ def main():
     """Main function to run multiple experiments."""
     # Define experiments
     DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
-    INFO = "class_weights"
+    INFO = "class_weights_augmentation_lab_with_lr_find"
 
 
     # Get data loaders
@@ -276,7 +282,7 @@ def main():
                 "batch_size": 64,
             },
             # "skip": True,
-            # "lr_find": True,
+            "lr_find": True,
             "info": INFO,
             # "UID": "20241129_145429"
         },
