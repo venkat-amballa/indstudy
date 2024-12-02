@@ -309,7 +309,6 @@ def train_and_evaluate(loss_functions, loss_fn_name, model, train_loader, val_lo
 
         # Evaluate on validation set
         val_loss, val_f1, val_accuracy = evaluate_model(model, val_loader, criterion, device=device)
-        
         # scheduler.step(val_accuracy)
         scheduler.step(val_loss)
         
@@ -343,9 +342,6 @@ def evaluate_model(model, data_loader, criterion, device=DEVICE):
     with torch.no_grad():
         for images, labels in data_loader:
             images, labels = images.to(device), labels.to(device)
-            
-            # If using mixed precision, uncomment the next line
-            # with torch.cuda.amp.autocast():
             outputs = model(images)
             loss = criterion(outputs, labels)
             
