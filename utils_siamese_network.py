@@ -15,6 +15,8 @@ import datetime
 import time
 from tqdm import tqdm
 import argparse
+from torch.amp import GradScaler
+from sklearn.metrics import accuracy_score, classification_report
 
 warnings.filterwarnings("ignore", category=UserWarning)
 
@@ -28,7 +30,7 @@ label_mapping_isic2018 = {
     'DF': 5,
     'VASC': 6
 }
-DEVICE = 'cpu'
+DEVICE = 'cuda'
 
 class ISIC2018Dataset(Dataset):
     def __init__(self, csv_file, img_dir, transform=None):
@@ -63,15 +65,23 @@ class TripletISIC2018Dataset(Dataset):
         self.img_dir = img_dir
         self.transform = transform
         self.data['label_encoded'] = self.data['label'].map(label_mapping_isic2018)
-        
+        pos_neg_map = {}
+        for label in self.data['label_encoded'].unique():
+            pos_neg_map[label] = {
+                'positive': self.data[self.data['label_encoded'] == label],
+                'negative': self.data[self.data['label_encoded'] != label]
+            }
+        self.pos_neg_map  = pos_neg_map
     def __len__(self):
         return len(self.data)
 
     def __getitem__(self, idx):
         anchor = self.data.iloc[idx]
-        pos_candidates = self.data[self.data['label_encoded'] == anchor['label_encoded']]
-        neg_candidates = self.data[self.data['label_encoded'] != anchor['label_encoded']]
-        
+        label = anchor['label_encoded']
+
+        pos_candidates = self.pos_neg_map[label]['positive']
+        neg_candidates = self.pos_neg_map[label]['negative']
+
         positive = pos_candidates.sample(1).iloc[0]
         negative = neg_candidates.sample(1).iloc[0]
 
@@ -102,15 +112,35 @@ class ContrastiveLoss(nn.Module):
         loss = torch.mean((pos_dist)**2 + torch.relu(self.margin - neg_dist)**2)
         return loss
 
+class DualMSLoss(nn.Module):
+    def __init__(self, margin_positive=0.5, margin_negative=1.5):
+        super(DualMSLoss, self).__init__()
+        self.margin_positive = margin_positive
+        self.margin_negative = margin_negative
+
+    def forward(self, anchor, positive, negative):
+        pos_dist = torch.norm(anchor - positive, p=2, dim=1)  # Positive pair distance
+        neg_dist = torch.norm(anchor - negative, p=2, dim=1)  # Negative pair distance
+
+        positive_loss = torch.clamp(pos_dist - self.margin_positive, min=0) ** 2
+
+        negative_loss = torch.clamp(self.margin_negative - neg_dist, min=0) ** 2
+
+        loss = torch.mean(positive_loss + negative_loss)
+
+        return loss
+
 
 # Modified Training and Evaluation Functions for Triplet Network
 def train_triplet_network(model, train_loader, val_loader, optimizer, loss_fn, 
                           RESULTS_PTH, 
                           num_epochs=10, 
                           checkpoint_path="triplet_best_model.pth",
-                          device=DEVICE):
+                          device=DEVICE,
+                          writer = None,
+                          train_loader_normal = None):
     
-    best_loss = float('inf')
+    best_acc = 0
     start_epoch = 0
 
     if os.path.exists(checkpoint_path):
@@ -118,57 +148,98 @@ def train_triplet_network(model, train_loader, val_loader, optimizer, loss_fn,
         model.load_state_dict(checkpoint['model_state_dict'])
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         start_epoch = checkpoint['epoch'] + 1
-        best_loss = checkpoint['best_loss']
-        print(f"Resuming training from epoch {start_epoch + 1} with best loss: {best_loss:.4f}")
+        best_acc = checkpoint['best_acc']
+        print(f"Resuming training from epoch {start_epoch + 1} with best loss: {best_acc:.4f}")
 
-    results = {'epoch':[], 'loss':[], 'val_loss':[]}
+    # results = {'epoch':[], 'loss':[], 'val_acc':[]}
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 
+                                                           mode="max", 
+                                                           factor=0.1, 
+                                                           patience=3, 
+                                                           verbose=True)
+    
+    
+
+    grad_scaler = GradScaler()
+    
+    AMP_TRAIN = True
+    accumulation_steps = 4
+    
     for epoch in tqdm(range(start_epoch, num_epochs)):
         model.train()
         batch = 0
         running_loss = 0.0
-        for anchor, positive, negative in tqdm(train_loader):
-            # batch += 1
-            # if batch > 3:
+        optimizer.zero_grad()
+
+        for batch_idx, (anchor, positive, negative) in enumerate(tqdm(train_loader)):
+            # if batch_idx>10:
             #     break
             anchor, positive, negative = anchor.to(device), positive.to(device), negative.to(device)
-            optimizer.zero_grad()
-            
+
             anchor_embed, positive_embed, negative_embed = model(anchor), model(positive), model(negative)
-            loss = loss_fn(anchor_embed, positive_embed, negative_embed)
-            
-            loss.backward()
-            optimizer.step()
-            running_loss += loss.item()
+
+            if AMP_TRAIN:
+                with torch.amp.autocast(device_type=device, dtype=torch.float16):
+                    anchor_embed, positive_embed, negative_embed = model(anchor), model(positive), model(negative)
+                    loss = loss_fn(anchor_embed, positive_embed, negative_embed)
+                    loss = loss / accumulation_steps
+                grad_scaler.scale(loss).backward()                
+                # grad_scaler.step(optimizer)
+                # grad_scaler.update()
+            else:
+                anchor_embed, positive_embed, negative_embed = model(anchor), model(positive), model(negative)
+                loss = loss_fn(anchor_embed, positive_embed, negative_embed)
+                loss = loss / accumulation_steps  # Scale loss
+                loss.backward()
+                # optimizer.step()
+
+            # Accumulate gradients and step optimizer every accumulation_steps
+            if (batch_idx + 1) % accumulation_steps == 0 or batch_idx+1 == len(train_loader):
+                if AMP_TRAIN:
+                    grad_scaler.step(optimizer)
+                    grad_scaler.update()
+                else:
+                    optimizer.step()
+                optimizer.zero_grad()  # Reset gradients
+
+            running_loss += loss.item()* accumulation_steps
 
         avg_loss = running_loss / len(train_loader)
-        val_loss = evaluate_triplet_network(model, loss_fn, val_loader, device=device)
+        # val_acc = evaluate_triplet_network(model, loss_fn, val_loader, device=device)
+        val_f1, val_acc = evaluate_triplet_model(model, train_loader_normal, val_loader, device=device)
+        
+        # Log metrics to TensorBoard
+        if writer:
+            writer.add_scalar('Loss/train', avg_loss, epoch)
+            writer.add_scalar('Accuracy/val', val_acc, epoch)
+            writer.add_scalar('F1_Score/val', val_f1, epoch)
+        # results['epoch'] = epoch+1
+        # results['loss'].append(avg_loss)
+        # results['val_acc'].append(val_acc)
+        # results['val_f1'].append(val_f1)
 
-        results['epoch'] = epoch+1
-        results['loss'].append(avg_loss)
-        results['val_loss'].append(val_loss)
-
-        if not os.path.exists(RESULTS_PTH):
-            results_df = pd.DataFrame({'epoch':[], 'loss':[], 'val_loss':[]})
-        else:
-            results_df = pd.read_csv(RESULTS_PTH)
+        # if not os.path.exists(RESULTS_PTH):
+        #     results_df = pd.DataFrame({'epoch':[], 'loss':[], 'val_acc':[]})
+        # else:
+        #     results_df = pd.read_csv(RESULTS_PTH)
     
-        results_df.loc[len(results_df)] = [epoch+1, avg_loss, val_loss]
+        # results_df.loc[len(results_df)] = [epoch+1, avg_loss, val_acc]
             
-        results_df.to_csv(RESULTS_PTH, index=False)
+        # results_df.to_csv(RESULTS_PTH, index=False)
 
         print(f"Epoch [{epoch + 1}/{num_epochs}], Loss: {avg_loss:.4f}")
 
-        if val_loss < best_loss:
-            best_loss = val_loss
+        if val_acc < best_acc:
+            best_acc = val_acc
             torch.save({
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
-                'best_loss': best_loss
+                'best_acc': best_acc
             }, checkpoint_path)
-            print(f"Model checkpoint saved with loss {best_loss:.4f}")
+            print(f"Model checkpoint saved with loss {best_acc:.4f}")
 
-    return results
+    # return results
 
 def generate_reference_embeddings(model, data_loader, device=DEVICE):
     """
@@ -248,3 +319,21 @@ def evaluate_triplet_network(model, loss_fn, data_loader, device=DEVICE):
     avg_loss = running_loss / len(data_loader)
     return avg_loss
 
+
+
+def evaluate_triplet_model(model, train_loader, data_loader, device=DEVICE, report=False):
+    """Evaluate the model."""
+    model.eval()
+    all_preds, all_labels = [], []
+    reference_embeddings = generate_reference_embeddings(model, train_loader, device=device)
+    predictions_dict = predict_class(model, data_loader, reference_embeddings, device=device)
+
+    # Compute and print metrics
+    y_true, y_pred = predictions_dict['true_label'], predictions_dict['predicted_label']
+    accuracy = accuracy_score(y_true, y_pred)
+    f1 = f1_score(y_true, y_pred, average='weighted')
+    print(f"\nEvaluated accuracy: {accuracy:.4f}")
+    print(f"Evaluated f1_score: {f1:.4f}")
+    if report:
+        print(classification_report(y_true, y_pred))
+    return f1, accuracy

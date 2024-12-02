@@ -197,6 +197,11 @@ def train_and_evaluate(loss_functions, loss_fn_name, model, train_loader, val_lo
 
     criterion = loss_functions[loss_fn_name]
     
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 
+                                                           mode="max", 
+                                                           factor=0.1, 
+                                                           patience=3, 
+                                                           verbose=True)
     for epoch in tqdm(range(start_epoch, num_epochs)):
         model.train()
         running_loss = 0.0
@@ -230,6 +235,9 @@ def train_and_evaluate(loss_functions, loss_fn_name, model, train_loader, val_lo
         val_f1, val_accuracy = evaluate_model(model, val_loader, 
                                               REPORT_PTH, 
                                               device=device)
+        
+        scheduler.step(val_accuracy)
+        
         if writer:
             # Log training metrics 
             writer.add_scalar(f'{loss_fn_name}/Train_Loss', train_loss, epoch)

@@ -22,17 +22,14 @@ loss_functions = {
     # 'F1Loss': F1Loss(),
 }
 
-def convert_to_hsv(img):
-    """Converts a PIL image to HSV using OpenCV."""
-    img = np.array(img)  # Convert PIL to numpy
-    img_hsv = cv2.cvtColor(img, cv2.COLOR_RGB2HSV)
-    return Image.fromarray(img_hsv)
 
-def convert_to_lab(img):
-    """Converts a PIL image to LAB using OpenCV."""
-    img = np.array(img)  # Convert PIL to numpy
-    img_hsv = cv2.cvtColor(img, cv2.COLOR_RGB2LAB)
-    return Image.fromarray(img_hsv)
+# Function to show images
+def imshow(image, ax, title=""):
+    # Tensor (C, H, W) to (H, W, C)
+    image = image.numpy().transpose((1, 2, 0)) 
+    ax.imshow(image)
+    ax.set_title(title)
+    ax.axis('off')
 
 def get_transforms():
     """Define data preprocessing transformations."""
@@ -59,22 +56,44 @@ def get_transforms():
     # # 5. mixup - Combines two images using a weighted average
 
     # # 4. Image Fusion - Overlaying two images to produce more data points.
+    # Image.blend()
     # # SoftAugementation (CVPR, 2023)
 
     train_transforms = transforms.Compose([
         transforms.Resize((224, 224), interpolation=transforms.InterpolationMode.BICUBIC),
-        transforms.Lambda(convert_to_lab),  # Convert to HSV
+        # transforms.Lambda(convert_to_hsv),  # Convert to HSV, no improvement
+        # transforms.Lambda(convert_to_lab),  # Convert to lab, no improvement
+        transforms.RandomEqualize(),
         transforms.RandomHorizontalFlip(),
         transforms.RandomVerticalFlip(),
+        transforms.RandomErasing(p=0.2),
         transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.1),
         transforms.RandomAffine(degrees=15, translate=(0.1, 0.1), scale=(0.8, 1.2)),
         transforms.ToTensor(),
         transforms.Normalize(IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD),
     ])
 
+    # train_transforms = transforms.Compose([
+    #     transforms.Resize((224, 224), interpolation=transforms.InterpolationMode.BICUBIC),  
+    #     transforms.RandomCrop(200),                                                          
+    #     transforms.RandomHorizontalFlip(),                                                   
+    #     transforms.RandomVerticalFlip(),                                                     
+    #     transforms.RandomRotation(30),                                                       
+    #     transforms.ColorJitter(brightness=0.5, contrast=0.3, saturation=0.3, hue=0.3),        
+    #     transforms.RandomAffine(degrees=15, translate=(0.1, 0.1), scale=(0.8, 1.2)),          
+    #     transforms.RandomPerspective(distortion_scale=0.2, p=0.2, interpolation=3),
+    #     transforms.RandomErasing(p=0.2),  # Randomly erase portions of the image
+    #     # transforms.Lambda(lambda img: add_gaussian_noise(img, mean=0, std=0.1)),  # Gaussian noise
+    #     # transforms.Lambda(lambda img: convert_to_hsv(img)),  # Convert image to HSV
+    #     # transforms.Lambda(lambda img: gamma_correction(img, gamma=random.uniform(0.5, 2.5))),  # Gamma correction
+    #     transforms.ToTensor(),                                                                
+    #     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])         
+    # ])
+
     test_transforms = transforms.Compose([
         transforms.Resize((224, 224), interpolation=transforms.InterpolationMode.BICUBIC),
         transforms.ToTensor(),
+        # transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])         
         transforms.Normalize(IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD),
     ])
 
@@ -233,10 +252,9 @@ def main():
     """Main function to run multiple experiments."""
     # Define experiments
     DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
-    INFO = "class_weights_augmentation_lab_with_lr_find"
+    INFO = "cw_aug_sche_lronplateau"
 
-
-    # Get data loaders
+    # Get data loaders 
     train_transforms, test_transforms = get_transforms()
     train_loader, val_loader, test_loader, labels = get_dataloaders(DATASET_DIR, BATCH_SIZE, 
                                                             train_transforms, 
@@ -282,7 +300,7 @@ def main():
                 "batch_size": 64,
             },
             # "skip": True,
-            "lr_find": True,
+            # "lr_find": True,
             "info": INFO,
             # "UID": "20241129_145429"
         },

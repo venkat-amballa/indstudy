@@ -9,19 +9,22 @@ from torchvision import transforms
 from sklearn.metrics import accuracy_score, classification_report
 from utils_siamese_network import *
 import timm
+from torch.utils.tensorboard import SummaryWriter
 
 # Constants and Hyperparameters
 
 DATASET_DIR = 'datasets'
 BATCH_SIZE = 32
-EPOCHS = 50
+EPOCHS = 20
 MODEL_TYPE = 'resnet50'
-CHANGES = '-margin-2'
-LOSS_FN_NAME = f'-mean-std-interpol-constrastiveloss{CHANGES}'
+MODEL_TYPE = 'efficientnet_b0'
+CHANGES = '-dualmsloss'
+LOSS_FN_NAME = f'-mean-std-interpol-{CHANGES}'
 # Loss function
-loss_fn = ContrastiveLoss(margin=2)
-
-EXPERIMENT_DIR = os.path.join(f'triplet_{MODEL_TYPE}{CHANGES}')
+# loss_fn = ContrastiveLoss(margin=2)
+loss_fn = DualMSLoss()
+experiment_name = f'triplet_{MODEL_TYPE}{CHANGES}'
+EXPERIMENT_DIR = os.path.join(experiment_name)
 
 # Paths for dataset files
 METADATA_FILE_PTH = os.path.join(DATASET_DIR, 'HAM10000_metadata.csv')
@@ -62,18 +65,32 @@ os.makedirs(EXPERIMENT_DIR, exist_ok=True)
 train_dataset = TripletISIC2018Dataset(csv_file=TRAIN_GROUND_TRUTH_PTH, 
                                        img_dir=TRAIN_IMAGES_DIR, 
                                        transform=train_transforms)
+# Load datasets and dataloaders
+train_dataset_normal = ISIC2018Dataset(csv_file=TRAIN_GROUND_TRUTH_PTH, 
+                                       img_dir=TRAIN_IMAGES_DIR, 
+                                       transform=train_transforms)
 
-val_dataset = TripletISIC2018Dataset(csv_file=VAL_GROUND_TRUTH_PTH, 
-                                     img_dir=VAL_IMAGES_DIR, 
-                                     transform=train_transforms)
+val_dataset = ISIC2018Dataset(csv_file=VAL_GROUND_TRUTH_PTH, 
+                               img_dir=VAL_IMAGES_DIR, 
+                               transform=train_transforms)
 
 test_dataset = ISIC2018Dataset(csv_file=TEST_GROUND_TRUTH_PTH, 
                                img_dir=TEST_IMAGES_DIR, 
                                transform=test_transform)
 
 train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=2, pin_memory=True)
+train_loader_normal = DataLoader(train_dataset_normal, batch_size=BATCH_SIZE, shuffle=True, num_workers=2, pin_memory=True)
 val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=2, pin_memory=True)
 test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=2, pin_memory=True)
+
+
+
+def initialize_writer(experiment_name, uid):
+    """Initialize TensorBoard SummaryWriter."""
+    log_dir = f"runs/{experiment_name}_{uid}"
+    return SummaryWriter(log_dir=log_dir)
+
+
 
 # Model initialization
 def main():
@@ -86,13 +103,18 @@ def main():
 
     args = parser.parse_args()
 
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
     EPOCHS = args.epochs if args.epochs else 50 
     DEVICE = args.device if args.device else device
     LR = args.learning_rate if args.learning_rate else 1e-5
     UID = args.uid if args.uid else datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
     print("Using Device:", DEVICE)
+    
+    writer = initialize_writer(experiment_name, UID)
+    
+    # variable to log expeiment data
+    experiment_text = ""
 
     CHECKPOINT_PATH = os.path.join(EXPERIMENT_DIR, f"triplet_best_model_{UID}.pth")
     RESULTS_PTH = os.path.join(EXPERIMENT_DIR, f"results_{MODEL_TYPE}_{LOSS_FN_NAME}_{UID}.csv")
@@ -111,7 +133,9 @@ def main():
                                         RESULTS_PTH,
                                         num_epochs=EPOCHS, 
                                         checkpoint_path=CHECKPOINT_PATH,
-                                        device=DEVICE
+                                        device=DEVICE,
+                                        writer = writer,
+                                        train_loader_normal = train_loader_normal
                                         )
 
     # test_loss = evaluate_triplet_network(model, loss_fn, test_loader)
@@ -126,26 +150,34 @@ def main():
     model.load_state_dict(checkpoint['model_state_dict'])
     optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
 
-    # Generate reference embeddings and predictions
-    reference_embeddings = generate_reference_embeddings(model, train_loader, device=DEVICE)
-    predictions = predict_class(model, test_loader, reference_embeddings, device=DEVICE)
+    test_f1, test_acc = evaluate_triplet_model(model, train_loader, test_loader, 
+                                               device=DEVICE, report=True)
 
-    # Save predictions
-    predictions_df = pd.DataFrame(predictions)
-    predictions_df.to_csv(PREDICTIONS_PTH, index=False)
-    print(f"Predictions saved to {PREDICTIONS_PTH}")
+    # # Generate reference embeddings and predictions
+    # reference_embeddings = generate_reference_embeddings(model, train_loader, device=DEVICE)
+    # predictions = predict_class(model, test_loader, reference_embeddings, device=DEVICE)
 
-    # Compute and print metrics
-    y_true, y_pred = predictions_df['true_label'], predictions_df['predicted_label']
-    accuracy = accuracy_score(y_true, y_pred)
-    print("=" * 30)
+    # # Save predictions
+    # predictions_df = pd.DataFrame(predictions)
+    # predictions_df.to_csv(PREDICTIONS_PTH, index=False)
+    # print(f"Predictions saved to {PREDICTIONS_PTH}")
 
-    with open(REPORT_PTH, 'w') as fp:
-        fp.write(f"Accuracy: {accuracy:.4f}\n")    
-        fp.write(classification_report(y_true, y_pred))
+    # # Compute and print metrics
+    # y_true, y_pred = predictions_df['true_label'], predictions_df['predicted_label']
+    # accuracy = accuracy_score(y_true, y_pred)
 
-    print(f"Accuracy: {accuracy:.4f}")
-    print(classification_report(y_true, y_pred))
+    # Append test results and hyperparameters to experiment text
+    experiment_text += f"Test: f1_score={test_f1}, Test: Accuracy={test_acc}\n"
+    print(experiment_text)
+
+    # with open(REPORT_PTH, 'w') as fp:
+    #     fp.write(f"Accuracy: {accuracy:.4f}\n")    
+    #     fp.write(classification_report(y_true, y_pred))
+
+    writer.add_text("Experiment Results", experiment_text)
+
+    writer.flush()
+    writer.close()
 
 if __name__ == '__main__':
     main()

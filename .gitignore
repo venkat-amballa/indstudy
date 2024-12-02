@@ -7,3 +7,5 @@ __pycache__/*
 runs/*
 tracker.md
 snippets.__pycache__
+temp.ipynb
+snippets.py
