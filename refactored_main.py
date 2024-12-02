@@ -8,6 +8,7 @@ from PIL import Image
 import numpy as np
 from sklearn.utils.class_weight import compute_class_weight
 import numpy as np
+import argparse
 
 NUM_CLASSES = 7
 BATCH_SIZE = 64
@@ -65,18 +66,19 @@ def get_transforms():
 
     train_transforms = transforms.Compose([
         transforms.Resize((224, 224), interpolation=transforms.InterpolationMode.BICUBIC),  
-        transforms.RandomCrop(200),                                                          
+        # transforms.Resize((256, 256), interpolation=transforms.InterpolationMode.BICUBIC),  
+        # transforms.RandomCrop(224),                                                          
         transforms.RandomHorizontalFlip(),                                                   
         transforms.RandomVerticalFlip(),                                                     
         transforms.RandomRotation(30),                                                       
         transforms.ColorJitter(brightness=0.5, contrast=0.3, saturation=0.3, hue=0.3),        
         transforms.RandomAffine(degrees=15, translate=(0.1, 0.1), scale=(0.8, 1.2)),          
-        transforms.RandomPerspective(distortion_scale=0.2, p=0.3, interpolation=3),
+        # transforms.RandomPerspective(distortion_scale=0.2, p=0.3, interpolation=3),
         # transforms.Lambda(lambda img: add_gaussian_noise(img, mean=0, std=0.1)),  # Gaussian noise
         # transforms.Lambda(lambda img: convert_to_hsv(img)),  # Convert image to HSV
         # transforms.Lambda(lambda img: gamma_correction(img, gamma=random.uniform(0.5, 2.5))),  # Gamma correction
         transforms.ToTensor(),                                                                
-        transforms.RandomErasing(p=0.2),  # Randomly erase portions of the image
+        # transforms.RandomErasing(p=0.2),  # Randomly erase portions of the image
         transforms.Normalize(IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD),
         # transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])         
     ])
@@ -91,14 +93,21 @@ def get_transforms():
     return train_transforms, test_transforms
 
 
-def get_dataloaders(dataset_dir, batch_size, train_transforms, test_transforms, num_workers=NUM_WORKERS, required_labels=False):
+def get_dataloaders(dataset_dir, batch_size, train_transforms, test_transforms, num_workers=NUM_WORKERS, required_labels=False, handle_imbalance=True):
     """Create datasets and dataloaders."""
-    train_dataset = ISIC2018Dataset(
-        csv_file=os.path.join(dataset_dir, 'ISIC2018_Task3_Training_GroundTruth.csv'),
-        img_dir=os.path.join(dataset_dir, 'HAM10000_images'),
-        transform=train_transforms
-    )
-
+    if handle_imbalance:
+        train_dataset = ISIC2018DatasetBalancedPairing(
+            csv_file=os.path.join(dataset_dir, 'ISIC2018_Task3_Training_GroundTruth.csv'),
+            img_dir=os.path.join(dataset_dir, 'HAM10000_images'),
+            transform=train_transforms
+        )
+        print(f"{len(train_dataset)=}")
+    else:
+        train_dataset = ISIC2018Dataset(
+            csv_file=os.path.join(dataset_dir, 'ISIC2018_Task3_Training_GroundTruth.csv'),
+            img_dir=os.path.join(dataset_dir, 'HAM10000_images'),
+            transform=train_transforms
+        )
     val_dataset = ISIC2018Dataset(
         csv_file=os.path.join(dataset_dir, 'ISIC2018_Task3_Validation_GroundTruth.csv'),
         img_dir=os.path.join(dataset_dir, 'ISIC2018_Task3_Validation_Input'),
@@ -142,7 +151,7 @@ def initialize_writer(experiment_name, uid):
     return SummaryWriter(log_dir=log_dir)
 
 
-def run_experiment(experiment, loss_functions, train_loader, val_loader, test_loader):
+def run_experiment(experiment, loss_functions, train_loader, val_loader, test_loader, disable_wrtier=False):
     """Run a single experiment."""
     model_type = experiment["model_type"]
     loss_fn_name = experiment["loss_fn"]
@@ -159,7 +168,7 @@ def run_experiment(experiment, loss_functions, train_loader, val_loader, test_lo
     experiment_dir = setup_experiment_dir(experiment_name)
     uid = experiment.get('UID', datetime.datetime.now().strftime('%Y%m%d_%H%M%S'))
     print(f"======={experiment_name=}, {uid=} ==========")
-    writer = initialize_writer(experiment_name, uid)
+    writer = None if disable_wrtier else initialize_writer(experiment_name, uid)
 
     # # Save a sample batch for visualisation
     # examples = iter(train_loader)
@@ -238,21 +247,41 @@ def run_experiment(experiment, loss_functions, train_loader, val_loader, test_lo
     writer.flush()
     writer.close()
 
+def parse_arguments():
+    parser = argparse.ArgumentParser(description="Training arguments")
+    parser.add_argument("-e", "--epochs", type=int, help="Number of epochs")
+    parser.add_argument("-d", "--device", type=str, help="Device to use (cpu/cuda)")
+    parser.add_argument("-lr", "--learning_rate", type=float, help="Learning rate")
+    parser.add_argument("-uid", "--uid", type=str, help="UID for resuming the training")
+    parser.add_argument("-writer", "--disable_writer", action="store_false", help="disable tensorboard writer")
+
+    return parser.parse_args()
+
 
 def main():
     """Main function to run multiple experiments."""
+    args = parse_arguments()
+
+    # Device Configuration
+    EPOCHS = args.epochs if args.epochs else None
+    # lr = args.learning_rate or 1e-5
+    # uid = args.uid or datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+
     # Define experiments
     DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
+    print("Using Device:", DEVICE)
+
     INFO = "cw_aug_sche_lronplateau"
+    HADNLE_IMBALANCE = False # Fueses two images from same class, excluding NV class
 
     # Get data loaders 
     train_transforms, test_transforms = get_transforms()
     train_loader, val_loader, test_loader, labels = get_dataloaders(DATASET_DIR, BATCH_SIZE, 
                                                             train_transforms, 
                                                             test_transforms, 
-                                                            required_labels=True)
+                                                            required_labels=True,
+                                                            handle_imbalance=HADNLE_IMBALANCE)
 
-    print(len(labels))
     class_weights = compute_class_weight('balanced', classes=np.unique(labels), y=labels)
     class_weights = torch.tensor(class_weights, dtype=torch.float).to(DEVICE)
 
@@ -285,10 +314,10 @@ def main():
             "loss_fn": "CrossEntropy",
             "optimizer": "Adam",
             "hyperparams": {
-                "epochs": 20,
+                "epochs": EPOCHS if EPOCHS else 20,
                 "device": DEVICE,
                 "optimizer_params": {"lr": 5e-4},
-                "batch_size": 64,
+                "batch_size": BATCH_SIZE,
             },
             # "skip": True,
             # "lr_find": True,
@@ -300,26 +329,27 @@ def main():
             "loss_fn": "CrossEntropy",
             "optimizer": "Adam",
             "hyperparams": {
-                "epochs": 20,
+                "epochs": EPOCHS if EPOCHS else 20,
                 "device": DEVICE,
                 "optimizer_params": {"lr": 5e-4},
-                "batch_size": 64,
+                "batch_size": BATCH_SIZE,
             },
             "info": INFO,
             # "skip": False,
             # "lr_find": True,
-            "UID": "20241130_023847"
+            # "UID": "20241130_023847"
         },
     ]
 
 
     # Run each experiment
     for experiment in experiments:
+        print("modify INFO in experiment dictionary to add more info to the experimentfolder name")
         if experiment.get('skip', False):
             print(f"---Skipping experiment-->: {experiment['model_type']} with {experiment['loss_fn']}")
         else:
             print(f"Running experiment: {experiment['model_type']} with {experiment['loss_fn']}")
-            run_experiment(experiment, loss_functions, train_loader, val_loader, test_loader)
+            run_experiment(experiment, loss_functions, train_loader, val_loader, test_loader, disable_wrtier=False)
             
 
 if __name__ == "__main__":

@@ -107,100 +107,89 @@ class ISIC2018Dataset(Dataset):
             image = self.transform(image)
         return image, label
 
+import os
+import random
+import numpy as np
+import torch
+import pandas as pd
+from torch.utils.data import Dataset
+from collections import defaultdict
+from PIL import Image
+
+import os
+import random
+import numpy as np
+import torch
+import pandas as pd
+from torch.utils.data import Dataset
+from collections import defaultdict
+from PIL import Image
+import torchvision.transforms as transforms
+
+LABEL_MAPPING_ISIC2018 = {
+    'MEL': 0, 'NV': 1, 'BCC': 2, 'AKIEC': 3, 'BKL': 4, 'DF': 5, 'VASC': 6
+}
 
 class ISIC2018DatasetBalancedPairing(Dataset):
-    """Dataset for ISIC2018."""
     def __init__(self, csv_file, img_dir, transform=None, pair_factor=1):
         df = pd.read_csv(csv_file)
-        if 'label' not in df.columns:
-            df['label'] = df[df.columns[1:]].idxmax(axis=1)
-        self.data = df
-        self.pair_factor = pair_factor
+        df['label'] = df['label'] if 'label' in df.columns else df.iloc[:, 1:].idxmax(axis=1)
+        
+        # Filter out NV label
+        self.data = df[df['label'] != 'NV']
+        
         self.img_dir = img_dir
         self.transform = transform
+        self.pair_factor = pair_factor
+        
         self.data['label_encoded'] = self.data['label'].map(LABEL_MAPPING_ISIC2018)
-
         self.class_to_indices = defaultdict(list)
         for idx, label in enumerate(self.data['label_encoded']):
             self.class_to_indices[label].append(idx)
         
-        self.original_length = len(self.data) # total number of samples
-        self.paired_samples = []
-
+        # total samples and class counts
         self.class_counts = {label: len(indices) for label, indices in self.class_to_indices.items()}
         self.total_samples = sum(self.class_counts.values())
-
-        # Generate paired samples
-        self._generate_paired_samples()
+        self.label_keys = [k for k in self.class_to_indices.keys() if k != 1]  # Exclude NV label
 
     def _image_fusion(self, img1, img2, alpha=None):
-        img2_resized = img2.resize(img1.size)
-        if alpha is None:
-            alpha = random.uniform(0.3, 0.7)
+        alpha = random.uniform(0.3, 0.7) if alpha is None else alpha
         img1_np = np.array(img1, dtype=np.float32)
-        img2_np = np.array(img2_resized, dtype=np.float32)
+        img2_np = np.array(img2, dtype=np.float32)
         
         img_mixed = (1 - alpha) * img1_np + alpha * img2_np
-        img_mixed = np.clip(img_mixed, 0, 255).astype(np.uint8)
-        
-        return Image.fromarray(img_mixed)
+        return Image.fromarray(np.clip(img_mixed, 0, 255).astype(np.uint8).transpose(1,2,0))
     
-    def _generate_paired_samples(self):
-        for label, indices in self.class_to_indices.items():
-            num_samples = len(indices)
-        
-        # imbalance ratio 
-        imbalance_factor = self.total_samples / num_samples
-        num_pairs = int(self.pair_factor * imbalance_factor)
-        
-        for _ in range(max(1, num_pairs)):
-            for base_idx in indices:
-                base_img, base_label = self._get_image(base_idx)
-                
-                pair_idx = random.choice([idx for idx in indices if idx != base_idx])
-                pair_img, _ = self._get_image(pair_idx)
-                
-                # image fusion
-                paired_img = self._image_fusion(base_img, pair_img)
-                
-                if self.transform:
-                    paired_img = self.transform(paired_img)                
-                
-                self.paired_samples.append((paired_img, base_label))
-
     def _get_image(self, idx):
         img_name = os.path.join(self.img_dir, self.data.iloc[idx, 0] + '.jpg')
         image = Image.open(img_name).convert('RGB')
         label = torch.tensor(self.data.loc[idx, "label_encoded"], dtype=torch.long)
-        
-        if self.transform:
-            image = self.transform(image)
-        
-        return image, label
+        return (self.transform(image) if self.transform else image), label
 
     def __len__(self):
-        return self.original_length + len(self.paired_samples)
+        return self.total_samples + int(self.total_samples * self.pair_factor)
 
     def __getitem__(self, idx):
-        """ Get item from either original dataset or paired samples"""
-        if idx < self.original_length:
-            # Original dataset samples
+        if idx < self.total_samples:
             return self._get_image(idx)
-        else:
-            # Paired samples
-            return self.paired_samples[idx - self.original_length]
 
-    def __len__(self):
-        return len(self.data)
-
-    def __getitem__(self, idx):
-        img_name = os.path.join(self.img_dir, self.data.iloc[idx, 0] + '.jpg')
-        image = Image.open(img_name).convert('RGB')
-        label = torch.tensor(self.data.loc[idx, "label_encoded"], dtype=torch.long)
-        if self.transform:
-            image = self.transform(image)
-        return image, label
-
+        # excluding NV label
+        label_to_fuse = random.choice(self.label_keys)
+        label_indices = self.class_to_indices[label_to_fuse]
+        
+        if len(label_indices) < 2:
+            return self._get_image(random.randint(0, self.total_samples - 1))
+        
+        base_idx, pair_idx = random.sample(label_indices, 2)
+        base_img, base_label = self._get_image(base_idx)
+        pair_img, _ = self._get_image(pair_idx)
+        
+        base_img_pil = transforms.ToPILImage()(base_img.cpu()) if torch.is_tensor(base_img) else base_img
+        pair_img_pil = transforms.ToPILImage()(pair_img.cpu()) if torch.is_tensor(pair_img) else pair_img
+        
+        fused_img_pil = self._image_fusion(base_img_pil, pair_img_pil)
+        return (self.transform(fused_img_pil) if self.transform else fused_img_pil), base_label
+     
 
 class ISIC2019Dataset(Dataset):
     """Dataset for ISIC2019."""
@@ -278,11 +267,10 @@ def train_and_evaluate(loss_functions, loss_fn_name, model, train_loader, val_lo
 
     criterion = loss_functions[loss_fn_name]
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 
-                                                           mode="max", 
+                                                           mode="min", 
                                                            factor=0.1, 
-                                                           patience=3, 
-                                                           verbose=True)
-    for epoch in tqdm(range(start_epoch, num_epochs), desc="Epochs"):
+                                                           patience=4)
+    for epoch in tqdm(range(start_epoch, start_epoch + num_epochs), desc="Epochs"):
         model.train()
         running_loss, all_preds, all_labels = 0.0, [], []
 
@@ -320,9 +308,10 @@ def train_and_evaluate(loss_functions, loss_fn_name, model, train_loader, val_lo
         train_accuracy = accuracy_score(all_labels, all_preds)
 
         # Evaluate on validation set
-        val_f1, val_accuracy = evaluate_model(model, val_loader, device=device)
+        val_loss, val_f1, val_accuracy = evaluate_model(model, val_loader, criterion, device=device)
         
-        scheduler.step(val_accuracy)
+        # scheduler.step(val_accuracy)
+        scheduler.step(val_loss)
         
         if writer:
             writer.add_scalar(f"{loss_fn_name}/Train_Loss", train_loss,  global_step=epoch)
@@ -346,25 +335,29 @@ def train_and_evaluate(loss_functions, loss_fn_name, model, train_loader, val_lo
             print(f"New best model saved with validation accuracy: {best_val_accuracy:.4f}")
 
 
-def evaluate_model(model, data_loader, device=DEVICE):
-    """Evaluate the model."""
+def evaluate_model(model, data_loader, criterion, device=DEVICE):
     model.eval()
+    val_loss = 0.0
     all_preds, all_labels = [], []
 
     with torch.no_grad():
         for images, labels in data_loader:
             images, labels = images.to(device), labels.to(device)
+            
+            # If using mixed precision, uncomment the next line
+            # with torch.cuda.amp.autocast():
             outputs = model(images)
+            loss = criterion(outputs, labels)
+            
+            val_loss += loss.item() * images.size(0)
             _, predicted = torch.max(outputs, 1)
             all_preds.extend(predicted.cpu().numpy())
             all_labels.extend(labels.cpu().numpy())
 
+    val_loss /= len(data_loader.dataset)
     f1 = f1_score(all_labels, all_preds, average='weighted', zero_division=1)
     accuracy = accuracy_score(all_labels, all_preds)
-    print(f"Evaluated accuracy: {accuracy:.4f}")
+    
+    print(f"Evaluated Loss: {val_loss:.4f}, Accuracy: {accuracy:.4f}, F1 Score: {f1:.4f}")
 
-    # with open(report_path, 'w') as f:
-    #     f.write(f"Accuracy: {accuracy:.4f}\n")
-    #     f.write(classification_report(all_labels, all_preds, zero_division=1))
-
-    return f1, accuracy
+    return val_loss, f1, accuracy
