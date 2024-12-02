@@ -11,9 +11,9 @@ import numpy as np
 import argparse
 
 NUM_CLASSES = 7
-BATCH_SIZE = 64
+BATCH_SIZE = 256
 DATASET_DIR = 'datasets'
-NUM_WORKERS = 3 # for dataloader
+NUM_WORKERS = 8 # for dataloader
 
 loss_functions = {
     'CrossEntropy': nn.CrossEntropyLoss(),
