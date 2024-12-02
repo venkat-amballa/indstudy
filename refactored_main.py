@@ -260,6 +260,9 @@ def parse_arguments():
 
 def main():
     """Main function to run multiple experiments."""
+    HADNLE_IMBALANCE = False # Fueses two images from same class, excluding NV class
+    INFO = "cw_aug_sche_lronplateau"
+
     args = parse_arguments()
 
     # Device Configuration
@@ -270,9 +273,6 @@ def main():
     # Define experiments
     DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
     print("Using Device:", DEVICE)
-
-    INFO = "cw_aug_sche_lronplateau"
-    HADNLE_IMBALANCE = False # Fueses two images from same class, excluding NV class
 
     # Get data loaders 
     train_transforms, test_transforms = get_transforms()
