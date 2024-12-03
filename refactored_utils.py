@@ -20,6 +20,7 @@ import random
 import numpy as np
 from collections import defaultdict
 import cv2
+from sklearn.metrics import roc_auc_score
 
 # Suppress warnings
 warnings.simplefilter(action='ignore', category=FutureWarning)
@@ -268,11 +269,12 @@ def train_and_evaluate(loss_functions, loss_fn_name, model, train_loader, val_lo
     criterion = loss_functions[loss_fn_name]
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 
                                                            mode="min", 
-                                                           factor=0.1, 
+                                                           factor=0.6, 
                                                            patience=4)
     for epoch in tqdm(range(start_epoch, start_epoch + num_epochs), desc="Epochs"):
         model.train()
         running_loss, all_preds, all_labels = 0.0, [], []
+        all_probs = []
 
         for batch_idx, (images, labels) in enumerate(tqdm(train_loader, desc="Batches")):
             if skip_batches and batch_idx >= skip_batches:
@@ -298,29 +300,37 @@ def train_and_evaluate(loss_functions, loss_fn_name, model, train_loader, val_lo
             _, predicted = torch.max(outputs, 1)
             all_preds.extend(predicted.cpu().numpy())
             all_labels.extend(labels.cpu().numpy())
-
-            if writer:
-                writer.add_scalar(f"{loss_fn_name}/Batch_Loss", loss.item(), global_step=epoch * len(train_loader) + batch_idx)
-
+            
+            prob = torch.softmax(outputs, dim=1)
+            all_probs.extend(prob.detach().cpu().numpy())
         # Log training metrics
         train_loss = running_loss / len(train_loader)
         train_f1 = f1_score(all_labels, all_preds, average='weighted', zero_division=1)
         train_accuracy = accuracy_score(all_labels, all_preds)
 
         # Evaluate on validation set
-        val_loss, val_f1, val_accuracy = evaluate_model(model, val_loader, criterion, device=device)
+        val_loss, val_f1, val_accuracy, val_roc_auc = evaluate_model(model, val_loader, criterion, device=device)
         # scheduler.step(val_accuracy)
         scheduler.step(val_loss)
-        
+        # OVR; macro - treats all classes equally;
+        train_roc_auc = roc_auc_score(all_labels, np.array(all_probs), multi_class='ovr', average='macro')
+    
         if writer:
-            writer.add_scalar(f"{loss_fn_name}/Train_Loss", train_loss,  global_step=epoch)
-            writer.add_scalar(f"{loss_fn_name}/Train_F1", train_f1,  global_step=epoch)
-            writer.add_scalar(f"{loss_fn_name}/Train_Accuracy", train_accuracy,  global_step=epoch)
-            writer.add_scalar(f"{loss_fn_name}/Validation_F1", val_f1,  global_step=epoch)
-            writer.add_scalar(f"{loss_fn_name}/Validation_Accuracy", val_accuracy,  global_step=epoch)
+            writer.add_scalar(f"Train_Loss", train_loss,  global_step=epoch)
+            writer.add_scalar(f"Train_Accuracy", train_accuracy,  global_step=epoch)
+            writer.add_scalar(f"Train_F1", train_f1,  global_step=epoch)
+            writer.add_scalar(f"Train_roc_auc", train_roc_auc,  global_step=epoch)
+            writer.add_scalar(f"Validation_Loss", val_loss,  global_step=epoch)
+            writer.add_scalar(f"Validation_Accuracy", val_accuracy,  global_step=epoch)
+            writer.add_scalar(f"Validation_F1", val_f1,  global_step=epoch)
+            writer.add_scalar(f"Validation_ROC_AUC", val_roc_auc, global_step=epoch)
+            current_lr = scheduler.get_last_lr()[0]  # Get the learning rate for the first parameter group
+            writer.add_scalar(f"Learning_Rate", current_lr, global_step=epoch)
 
-        print(f"[{loss_fn_name}] Epoch {epoch + 1}/{num_epochs}, Train Loss: {train_loss:.4f}, Train Accuracy: {train_accuracy:.4f}, "
-              f"Train F1: {train_f1:.4f}, Val F1: {val_f1:.4f}, Val Accuracy: {val_accuracy:.4f}")
+
+        print(f"Epoch {epoch + 1}/{num_epochs}\n"
+              f"Train Loss: {train_loss:.2f}, Train Accuracy: {train_accuracy:.2f}, Train F1: {train_f1:.2f}, Train_roc_auc: {train_roc_auc:.2f}\n"
+              f"Valid Loss: {val_loss:.2f},   Valid Accuracy: {val_accuracy:.2f},   Valid F1: {val_f1:.2f},   Valid_roc_auc: {val_roc_auc:.2f}\n")
 
         # Save best model
         if val_accuracy > best_val_accuracy:
@@ -338,22 +348,23 @@ def evaluate_model(model, data_loader, criterion, device=DEVICE):
     model.eval()
     val_loss = 0.0
     all_preds, all_labels = [], []
-
+    all_probs = []
     with torch.no_grad():
-        for images, labels in data_loader:
+        for images, labels in tqdm(data_loader):
             images, labels = images.to(device), labels.to(device)
             outputs = model(images)
             loss = criterion(outputs, labels)
             
             val_loss += loss.item() * images.size(0)
             _, predicted = torch.max(outputs, 1)
-            all_preds.extend(predicted.cpu().numpy())
+            all_preds.extend(predicted.cpu().numpy())   
             all_labels.extend(labels.cpu().numpy())
+            # probabilites for roc_auc
+            prob = torch.softmax(outputs, dim=1)
+            all_probs.extend(prob.detach().cpu().numpy())
 
     val_loss /= len(data_loader.dataset)
     f1 = f1_score(all_labels, all_preds, average='weighted', zero_division=1)
     accuracy = accuracy_score(all_labels, all_preds)
-    
-    print(f"Evaluated Loss: {val_loss:.4f}, Accuracy: {accuracy:.4f}, F1 Score: {f1:.4f}")
-
-    return val_loss, f1, accuracy
+    roc_auc = roc_auc_score(all_labels, np.array(all_probs), multi_class='ovr', average='macro')
+    return val_loss, f1, accuracy, roc_auc

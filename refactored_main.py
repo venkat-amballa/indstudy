@@ -11,9 +11,7 @@ import numpy as np
 import argparse
 
 NUM_CLASSES = 7
-BATCH_SIZE = 256
 DATASET_DIR = 'datasets'
-NUM_WORKERS = 8 # for dataloader
 
 loss_functions = {
     'CrossEntropy': nn.CrossEntropyLoss(),
@@ -79,29 +77,30 @@ def get_transforms():
         # transforms.Lambda(lambda img: gamma_correction(img, gamma=random.uniform(0.5, 2.5))),  # Gamma correction
         transforms.ToTensor(),                                                                
         # transforms.RandomErasing(p=0.2),  # Randomly erase portions of the image
-        transforms.Normalize(IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD),
-        # transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])         
+        # transforms.Normalize(IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])         
     ])
 
     test_transforms = transforms.Compose([
         transforms.Resize((224, 224), interpolation=transforms.InterpolationMode.BICUBIC),
         transforms.ToTensor(),
-        # transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])         
-        transforms.Normalize(IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])         
+        # transforms.Normalize(IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD),
     ])
 
     return train_transforms, test_transforms
 
 
-def get_dataloaders(dataset_dir, batch_size, train_transforms, test_transforms, num_workers=NUM_WORKERS, required_labels=False, handle_imbalance=True):
+def get_dataloaders(dataset_dir, batch_size, train_transforms, test_transforms, num_workers, required_labels=False, handle_imbalance=False):
     """Create datasets and dataloaders."""
     if handle_imbalance:
+        print("Handling imbalance with fusion.....!")
         train_dataset = ISIC2018DatasetBalancedPairing(
             csv_file=os.path.join(dataset_dir, 'ISIC2018_Task3_Training_GroundTruth.csv'),
             img_dir=os.path.join(dataset_dir, 'HAM10000_images'),
             transform=train_transforms
         )
-        print(f"{len(train_dataset)=}")
+        print(f"Total size after: {len(train_dataset)=}")
     else:
         train_dataset = ISIC2018Dataset(
             csv_file=os.path.join(dataset_dir, 'ISIC2018_Task3_Training_GroundTruth.csv'),
@@ -151,12 +150,16 @@ def initialize_writer(experiment_name, uid):
     return SummaryWriter(log_dir=log_dir)
 
 
-def run_experiment(experiment, loss_functions, train_loader, val_loader, test_loader, disable_wrtier=False):
+def run_experiment(experiment, loss_functions, train_loader, val_loader, test_loader, enable_writer=False, skip_batches=None):
     """Run a single experiment."""
     model_type = experiment["model_type"]
     loss_fn_name = experiment["loss_fn"]
     optimizer_name = experiment["optimizer"]
     hyperparams = experiment["hyperparams"]
+    epochs = experiment['epochs']
+    device = experiment['device']
+    batch_size = experiment['batch_size']
+
     info = experiment.get("info", "")
     # Variable to accumlate experiments text results
     experiment_text = ""
@@ -166,9 +169,11 @@ def run_experiment(experiment, loss_functions, train_loader, val_loader, test_lo
     experiment_name = experiment_name + f"_{info}" if info else experiment_name
 
     experiment_dir = setup_experiment_dir(experiment_name)
-    uid = experiment.get('UID', datetime.datetime.now().strftime('%Y%m%d_%H%M%S'))
+    uid = experiment['uid']
     print(f"======={experiment_name=}, {uid=} ==========")
-    writer = None if disable_wrtier else initialize_writer(experiment_name, uid)
+    writer = None
+    if enable_writer:
+        writer = initialize_writer(experiment_name, uid)
 
     # # Save a sample batch for visualisation
     # examples = iter(train_loader)
@@ -178,21 +183,21 @@ def run_experiment(experiment, loss_functions, train_loader, val_loader, test_lo
 
 
     # Initialize model, loss, and optimizer
-    model = timm.create_model(model_type, pretrained=True, num_classes=NUM_CLASSES).to(hyperparams["device"])
+    model = timm.create_model(model_type, pretrained=True, num_classes=NUM_CLASSES).to(device)
     criterion = loss_functions[loss_fn_name]
     optimizer_class = getattr(torch.optim, optimizer_name)
-    optimizer = optimizer_class(model.parameters(), **hyperparams["optimizer_params"])
+    optimizer = optimizer_class(model.parameters(), **hyperparams)
 
     # Performing Lr range test to find the optimal Learning rate
     if experiment.get('lr_find', False):
         amp_config = {
-            'device_type': hyperparams['device'],
+            'device_type': device,
             'dtype': torch.float16,
         }
         grad_scaler = torch.amp.GradScaler()
         
         lr_finder = LRFinder(
-            model, optimizer, criterion, device=hyperparams['device'],
+            model, optimizer, criterion, device=device,
             amp_backend='torch', amp_config=amp_config, grad_scaler=grad_scaler
         )
         try:
@@ -201,15 +206,17 @@ def run_experiment(experiment, loss_functions, train_loader, val_loader, test_lo
             axs, lr_suggest = lr_finder.plot(show_lr=1.2, ax=axs, suggest_lr=True)
 
             # Log the lr range plot to tensor board
-            writer.add_figure("Lr_range_test", fig)
-            writer.flush()
+            if writer:
+                writer.add_figure("Lr_range_test", fig)
+                writer.flush()
             
             experiment_text += f"lr_range_test: lr_suggest={lr_suggest}\n"
             print(experiment_text)
 
             # Use the lr_min as the new learning rate
-            hyperparams["optimizer_params"]["lr"] = lr_suggest/100 # a safe lr value that is not aggressive
-            optimizer = optimizer_class(model.parameters(), **hyperparams["optimizer_params"])
+            hyperparams["lr"] = lr_suggest/100 # a safe lr value that is not aggressive
+            print(f"{lr_suggest=}, Using safe lr by : {lr_suggest/100=}")
+            optimizer = optimizer_class(model.parameters(), **hyperparams)
         finally:
             lr_finder.reset()
     # Paths
@@ -225,62 +232,72 @@ def run_experiment(experiment, loss_functions, train_loader, val_loader, test_lo
         train_loader=train_loader,
         val_loader=val_loader,
         optimizer=optimizer,
-        num_epochs=hyperparams["epochs"],
+        num_epochs=epochs,
         checkpoint_path=checkpoint_path,
         writer=writer,
-        device=hyperparams["device"],
-        skip_batches=hyperparams.get("skip_batches", None)
+        device=device,
+        skip_batches=skip_batches
     )
 
     # Evaluate on test set
     checkpoint = torch.load(checkpoint_path)
     model.load_state_dict(checkpoint['model_state_dict'])
-    test_f1, test_acc = evaluate_model(model, test_loader, device=hyperparams["device"])
+    test_loss, test_f1, test_acc, test_roc_auc = evaluate_model(model, test_loader, criterion, device=device)
+    print(f"Test Loss: {test_loss:.2f}, Test Accuracy: {test_acc:.2f}, Test F1: {test_f1:.2f}, Test_roc_auc: {test_roc_auc:.2f}\n")
 
     # Append test results and hyperparameters to experiment text
-    experiment_text += f"Test: f1_score={test_f1}, Test: Accuracy={test_acc}\n"
+    experiment_text += f"Test | loss={test_loss}, f1_score={test_f1}, accuracy={test_acc}, roc_auc={test_roc_auc}\n"
     experiment_text += f"Experiment: {str(experiment)}\n"
 
     # Loging the info at once
-    writer.add_text("Experiment Results", experiment_text)
-
-    writer.flush()
-    writer.close()
+    if writer:
+        writer.add_text("Experiment Results", experiment_text)
+        writer.flush()
+        writer.close()
 
 def parse_arguments():
     parser = argparse.ArgumentParser(description="Training arguments")
     parser.add_argument("-e", "--epochs", type=int, help="Number of epochs")
-    parser.add_argument("-d", "--device", type=str, help="Device to use (cpu/cuda)")
-    parser.add_argument("-lr", "--learning_rate", type=float, help="Learning rate")
+    parser.add_argument("-lr", "--learning_rate", default=5e-4, type=float, help="Learning rate")
+    parser.add_argument("-batch", "--batch_size", type=int, default=32, help="Batch size")
+    parser.add_argument("-workers", "--workers", type=int, default=3, help="Batch size")
+
+    parser.add_argument("-d", "--device", type=str, default="cuda", help="Device to use (cpu/cuda)")
     parser.add_argument("-uid", "--uid", type=str, help="UID for resuming the training")
-    parser.add_argument("-writer", "--disable_writer", action="store_false", help="disable tensorboard writer")
+    parser.add_argument("-writer", "--enable_writer", action="store_true", help="Enable tensorboard writer")
+    parser.add_argument("-skip_after", "--skip_batches_after", type=int, help="Run the training loop only for given no.of batches; Testing only!")
+    parser.add_argument("-imb_fusion", "--handle_imbalance_by_fusion", action="store_true", help="To handle imbalance using image fusion")
+    parser.add_argument("-info", "--info", type=str, help="This will be used while creating the experiemnt dir and in tensorboard.")
 
     return parser.parse_args()
 
 
 def main():
     """Main function to run multiple experiments."""
-    HADNLE_IMBALANCE = False # Fueses two images from same class, excluding NV class
-    INFO = "cw_aug_sche_lronplateau"
-
     args = parse_arguments()
-
+    print(args)
     # Device Configuration
-    EPOCHS = args.epochs if args.epochs else None
-    # lr = args.learning_rate or 1e-5
-    # uid = args.uid or datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
-
-    # Define experiments
-    DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
+    epochs = args.epochs
+    learning_rate = args.learning_rate
+    batch_size = args.batch_size
+    workers = args.workers
+    DEVICE = args.device
+    handle_imbalance = args.handle_imbalance_by_fusion
+    enable_writer = args.enable_writer
+    skip_batches = args.skip_batches_after if args.skip_batches_after else None
+    INFO = args.info if args.info else ""
+    
+    uid = args.uid if args.uid else datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
     print("Using Device:", DEVICE)
 
     # Get data loaders 
     train_transforms, test_transforms = get_transforms()
-    train_loader, val_loader, test_loader, labels = get_dataloaders(DATASET_DIR, BATCH_SIZE, 
+    train_loader, val_loader, test_loader, labels = get_dataloaders(DATASET_DIR, batch_size, 
                                                             train_transforms, 
                                                             test_transforms, 
+                                                            num_workers=workers,
                                                             required_labels=True,
-                                                            handle_imbalance=HADNLE_IMBALANCE)
+                                                            handle_imbalance=handle_imbalance)
 
     class_weights = compute_class_weight('balanced', classes=np.unique(labels), y=labels)
     class_weights = torch.tensor(class_weights, dtype=torch.float).to(DEVICE)
@@ -294,62 +311,33 @@ def main():
     }
 
     experiments = [
-        # {
-        #     "model_type": "efficientnet_b0",
-        #     "loss_fn": "CrossEntropy",
-        #     "optimizer": "AdamW",
-        #     "hyperparams": {
-        #         "epochs": 20,
-        #         "device": DEVICE,
-        #         "optimizer_params": {"lr": 1e-4, "weight_decay": 1e-6},
-        #         "batch_size": 64,
-        #     },
-        #     # "skip": True,
-        #     "lr_find": True,
-        #     "info": INFO,
-        #     # "UID": "20241129_143457"
-        # },
         {   # best 87% testing acc
             "model_type": "efficientnet_b0",
             "loss_fn": "CrossEntropy",
             "optimizer": "Adam",
+            "epochs": epochs,
+            "device": DEVICE,
+            "batch_size": batch_size,
             "hyperparams": {
-                "epochs": EPOCHS if EPOCHS else 20,
-                "device": DEVICE,
-                "optimizer_params": {"lr": 5e-4},
-                "batch_size": BATCH_SIZE,
+                "lr": learning_rate,
             },
             # "skip": True,
             # "lr_find": True,
             "info": INFO,
-            # "UID": "20241129_145429"
-        },
-        {    
-            "model_type": "resnet50",
-            "loss_fn": "CrossEntropy",
-            "optimizer": "Adam",
-            "hyperparams": {
-                "epochs": EPOCHS if EPOCHS else 20,
-                "device": DEVICE,
-                "optimizer_params": {"lr": 5e-4},
-                "batch_size": BATCH_SIZE,
-            },
-            "info": INFO,
-            # "skip": False,
-            # "lr_find": True,
-            # "UID": "20241130_023847"
-        },
+            "uid": uid
+        }
     ]
-
 
     # Run each experiment
     for experiment in experiments:
-        print("modify INFO in experiment dictionary to add more info to the experimentfolder name")
         if experiment.get('skip', False):
             print(f"---Skipping experiment-->: {experiment['model_type']} with {experiment['loss_fn']}")
         else:
             print(f"Running experiment: {experiment['model_type']} with {experiment['loss_fn']}")
-            run_experiment(experiment, loss_functions, train_loader, val_loader, test_loader, disable_wrtier=False)
+            run_experiment(experiment, loss_functions, 
+                           train_loader, val_loader, test_loader, 
+                           enable_writer=enable_writer,
+                           skip_batches=skip_batches)
             
 
 if __name__ == "__main__":

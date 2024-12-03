@@ -187,7 +187,7 @@ def train_triplet_network(
         if writer:
             writer.add_scalar('Loss/train', avg_loss, epoch)
             writer.add_scalar('Accuracy/val', val_acc, epoch)
-            writer.add_scalar('F1_Score/val', val_f1, epoch)
+            writer.add_scalar('F1_Score/    val', val_f1, epoch)
 
         if val_acc > best_acc:
             best_acc = val_acc
