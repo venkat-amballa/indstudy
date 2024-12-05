@@ -1,204 +1,85 @@
 import warnings
 import torch
 import torch.nn as nn
-from torch.utils.data import Dataset
-import pandas as pd
 from sklearn.metrics import f1_score, accuracy_score, classification_report
 from torchvision import transforms
-from PIL import Image
 import os
 from tqdm import tqdm
 from torch.amp import GradScaler
 
-from timm.data.constants import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
+# from losses import *
+from constants import *
 # Suppress warnings
 warnings.filterwarnings("ignore", category=UserWarning)
-
-# Device Configuration
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-# Label Mapping
-LABEL_MAPPING_ISIC2018 = {
-    'MEL': 0,
-    'NV': 1,
-    'BCC': 2,
-    'AKIEC': 3,
-    'BKL': 4,
-    'DF': 5,
-    'VASC': 6
-}
-
-# Dataset Classes
-class ISIC2018Dataset(Dataset):
-    """Dataset class for ISIC 2018 images and labels."""
-
-    def __init__(self, csv_file, img_dir, transform=None):
-        df = pd.read_csv(csv_file)
-        if 'label' not in df.columns:
-            df['label'] = df[df.columns[1:]].idxmax(axis=1)
-        self.data = df
-        self.img_dir = img_dir
-        self.transform = transform
-        self.data['label_encoded'] = self.data['label'].map(LABEL_MAPPING_ISIC2018)
-
-    def __len__(self):
-        return len(self.data)
-
-    def __getitem__(self, idx):
-        img_path = os.path.join(self.img_dir, f"{self.data.iloc[idx, 0]}.jpg")
-        image = Image.open(img_path).convert('RGB')
-        label = torch.tensor(self.data.loc[idx, "label_encoded"], dtype=torch.long)
-        if self.transform:
-            image = self.transform(image)
-        return image, label
-
-
-class TripletISIC2018Dataset(Dataset):
-    """Triplet dataset class for ISIC 2018."""
-
-    def __init__(self, csv_file, img_dir, transform=None):
-        df = pd.read_csv(csv_file)
-        if 'label' not in df.columns:
-            df['label'] = df[df.columns[1:]].idxmax(axis=1)
-        self.data = df
-        self.img_dir = img_dir
-        self.transform = transform
-        self.data['label_encoded'] = self.data['label'].map(LABEL_MAPPING_ISIC2018)
-        self.pos_neg_map = {
-            label: {
-                'positive': self.data[self.data['label_encoded'] == label],
-                'negative': self.data[self.data['label_encoded'] != label]
-            }
-            for label in self.data['label_encoded'].unique()
-        }
-
-    def __len__(self):
-        return len(self.data)
-
-    def __getitem__(self, idx):
-        anchor = self.data.iloc[idx]
-        label = anchor['label_encoded']
-        pos_candidates = self.pos_neg_map[label]['positive']
-        neg_candidates = self.pos_neg_map[label]['negative']
-
-        positive = pos_candidates.sample(1).iloc[0]
-        negative = neg_candidates.sample(1).iloc[0]
-
-        anchor_img = self._load_image(anchor['image'])
-        positive_img = self._load_image(positive['image'])
-        negative_img = self._load_image(negative['image'])
-
-        return anchor_img, positive_img, negative_img
-
-    def _load_image(self, image_id):
-        img_path = os.path.join(self.img_dir, f"{image_id}.jpg")
-        image = Image.open(img_path).convert('RGB')
-        if self.transform:
-            image = self.transform(image)
-        return image
-
-
-# Loss Functions
-class TripletLoss(nn.Module):
-    def __init__(self, margin=1.0):
-        super(TripletLoss, self).__init__()
-        self.margin = margin
-    
-    def forward(self, anchor, positive, negative):
-        # p=2, euclidean dist
-        distance_positive = torch.nn.functional.pairwise_distance(anchor, positive, p=2) 
-        distance_negative = torch.nn.functional.pairwise_distance(anchor, negative, p=2)
-        
-        # calc triplet loss
-        loss = torch.nn.functional.relu(distance_positive - distance_negative + self.margin)
-        return loss.mean()
-
-class ContrastiveLoss(nn.Module):
-    def __init__(self, margin=1.0):
-        super(ContrastiveLoss, self).__init__()
-        self.margin = margin
-    
-    def forward(self, output1, output2, label):
-        euclidean_distance = torch.nn.functional.pairwise_distance(output1, output2, p=2)
-        loss = torch.mean((1 - label) * 0.5 * torch.pow(euclidean_distance, 2) +
-                          (label) * 0.5 * torch.pow(torch.clamp(self.margin - euclidean_distance, min=0.0), 2))
-        return loss
-
-
-class DualMSLoss(nn.Module):
-    """Dual Margin Separation Loss."""
-
-    def __init__(self, margin_positive=0.5, margin_negative=1.5):
-        super(DualMSLoss, self).__init__()
-        self.margin_positive = margin_positive
-        self.margin_negative = margin_negative
-
-    def forward(self, anchor, positive, negative):
-        pos_dist = torch.norm(anchor - positive, p=2, dim=1)
-        neg_dist = torch.norm(anchor - negative, p=2, dim=1)
-
-        positive_loss = torch.clamp(pos_dist - self.margin_positive, min=0) ** 2
-        negative_loss = torch.clamp(self.margin_negative - neg_dist, min=0) ** 2
-
-        return torch.mean(positive_loss + negative_loss)
-
+warnings.filterwarnings("ignore", category=FutureWarning)
 
 # Training and Evaluation
 def train_triplet_network(
     model, train_loader, val_loader, optimizer, 
-    loss_fn, 
+    criteria, 
     results_path,
     num_epochs, 
     checkpoint_path, device, writer=None, train_loader_normal=None
 ):
     """Train the triplet network."""
     best_acc = 0
+    best_loss = 1e8
     grad_scaler = GradScaler()
     AMP_TRAIN = True
     accumulation_steps = 4
+    start_epoch = 0
+    if os.path.exists(checkpoint_path):
+        checkpoint = torch.load(checkpoint_path)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        start_epoch = checkpoint['epoch'] + 1
+        best_val_accuracy = checkpoint['best_val_accuracy']
+        print(f"Resuming training from epoch {start_epoch} with best validation accuracy: {best_val_accuracy:.4f}")
 
-    for epoch in range(num_epochs):
+    for epoch in tqdm(range(start_epoch, start_epoch + num_epochs), desc="Epochs"):
         model.train()
         running_loss = 0.0
         optimizer.zero_grad()
 
-        for batch_idx, (anchor, positive, negative) in enumerate(tqdm(train_loader)):
-            anchor, positive, negative = anchor.to(device), positive.to(device), negative.to(device)
+        for batch_idx, (images, labels) in enumerate(tqdm(train_loader)):
+            # if batch_idx > 4:
+            #     break
+            images, labels = images.cuda(), labels.cuda()
+            optimizer.zero_grad()
 
-            with torch.amp.autocast(device_type=device, dtype=torch.float16):
-                anchor_embed = model(anchor)
-                positive_embed = model(positive)
-                negative_embed = model(negative)
-                loss = loss_fn(anchor_embed, positive_embed, negative_embed) / accumulation_steps
+            embeddings = model(images)
+            loss = criteria(embeddings, labels)
 
-            grad_scaler.scale(loss).backward()
+            loss.backward()
+            optimizer.step()
 
-            if (batch_idx + 1) % accumulation_steps == 0:
-                grad_scaler.step(optimizer)
-                grad_scaler.update()
-                optimizer.zero_grad()
-
-            running_loss += loss.item() * accumulation_steps
-
+            running_loss += loss.item()
+            
         avg_loss = running_loss / len(train_loader)
-        val_f1, val_acc = evaluate_triplet_model(model, train_loader_normal, val_loader, device=device)
-
+        # val_f1, val_acc = evaluate_triplet_model(model, train_loader_normal, val_loader, device=device)
+        val_f1, val_acc = None, None
         # Log metrics to TensorBoard
         if writer:
-            writer.add_scalar('Loss/train', avg_loss, epoch)
-            writer.add_scalar('Accuracy/val', val_acc, epoch)
-            writer.add_scalar('F1_Score/    val', val_f1, epoch)
+            writer.add_scalar('Train_Loss', avg_loss, epoch)
+            # writer.add_scalar('Val_Accuracy', val_acc, epoch)
+            # writer.add_scalar('Val_F1_Score', val_f1, epoch)
+        # print(f"Epoch {epoch + 1}/{num_epochs}\n"
+        # f"Train Loss: {train_loss:.2f}, Train Accuracy: {train_accuracy:.2f}, Train F1: {train_f1:.2f}, Train_roc_auc: {train_roc_auc:.2f}\n"
+        # f"Valid Loss: {val_loss:.2f},   Valid Accuracy: {val_accuracy:.2f},   Valid F1: {val_f1:.2f},   Valid_roc_auc: {val_roc_auc:.2f}\n")
+        print(f"Epoch {epoch+1}/{num_epochs} | Loss: {avg_loss}")
 
-        if val_acc > best_acc:
-            best_acc = val_acc
+        if checkpoint_path and avg_loss < best_loss:
+            best_loss = avg_loss
             torch.save({
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
-                'best_acc': best_acc
+                'best_loss': best_loss
             }, checkpoint_path)
-            print(f"Model checkpoint saved with accuracy: {best_acc:.4f}")
-
+            print(f"Model checkpoint saved with accuracy: {best_loss:.4f}")
+    
+    val_f1, val_acc = evaluate_triplet_model(model, train_loader, val_loader, device=device, report=True)
+    return val_f1, val_acc
 
 def evaluate_triplet_model(model, train_loader, val_loader, device=DEVICE, report=False):
     """Evaluate the triplet model using reference embeddings."""
@@ -222,7 +103,7 @@ def generate_reference_embeddings(model, data_loader, device=DEVICE):
     """Generate reference embeddings for each class."""
     model.eval()
     all_embeddings, all_labels = [], []
-
+    
     with torch.no_grad():
         for images, labels in tqdm(data_loader):
             images, labels = images.to(device), labels.to(device)

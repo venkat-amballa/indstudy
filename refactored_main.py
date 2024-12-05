@@ -9,8 +9,12 @@ import numpy as np
 from sklearn.utils.class_weight import compute_class_weight
 import numpy as np
 import argparse
+import albumentations as A
+from torchvision import transforms
 
-NUM_CLASSES = 7
+from dataloaders import ISIC2018Dataset, ISIC2018DatasetBalancedPairing
+
+NUM_CLASSES = 0 #7
 DATASET_DIR = 'datasets'
 
 loss_functions = {
@@ -257,7 +261,7 @@ def run_experiment(experiment, loss_functions, train_loader, val_loader, test_lo
 
 def parse_arguments():
     parser = argparse.ArgumentParser(description="Training arguments")
-    parser.add_argument("-e", "--epochs", type=int, help="Number of epochs")
+    parser.add_argument("-e", "--epochs", type=int, default=10, help="Number of epochs")
     parser.add_argument("-lr", "--learning_rate", default=5e-4, type=float, help="Learning rate")
     parser.add_argument("-batch", "--batch_size", type=int, default=32, help="Batch size")
     parser.add_argument("-workers", "--workers", type=int, default=3, help="Batch size")
@@ -303,9 +307,10 @@ def main():
     class_weights = torch.tensor(class_weights, dtype=torch.float).to(DEVICE)
 
     loss_functions = {
-        'CrossEntropy': nn.CrossEntropyLoss(weight=class_weights),
-        'FocalLoss': FocalLoss(alpha=1, gamma=2),
-        'LabelSmoothing': LabelSmoothingLoss(smoothing=0.1),
+        # 'CrossEntropy': nn.CrossEntropyLoss(weight=class_weights),
+        # 'FocalLoss': FocalLoss(alpha=1, gamma=2),
+        # 'LabelSmoothing': LabelSmoothingLoss(smoothing=0.1),
+        'SupConLoss': SupConLoss(temperature=0.1)
         # 'TverskyLoss': TverskyLoss(alpha=0.7, beta=0.3),
         # 'F1Loss': F1Loss(),
     }
@@ -313,13 +318,13 @@ def main():
     experiments = [
         {   # best 87% testing acc
             "model_type": "efficientnet_b0",
-            "loss_fn": "CrossEntropy",
+            "loss_fn": "SupConLoss",
             "optimizer": "Adam",
             "epochs": epochs,
             "device": DEVICE,
             "batch_size": batch_size,
             "hyperparams": {
-                "lr": learning_rate,
+                "lr": 5e-4
             },
             # "skip": True,
             # "lr_find": True,

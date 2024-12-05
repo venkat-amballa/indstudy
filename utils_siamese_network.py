@@ -132,7 +132,7 @@ class DualMSLoss(nn.Module):
 
 
 # Modified Training and Evaluation Functions for Triplet Network
-def train_triplet_network(model, train_loader, val_loader, optimizer, loss_fn, 
+def train_triplet_network(model, train_loader, val_loader, optimizer, criteria, 
                           RESULTS_PTH, 
                           num_epochs=10, 
                           checkpoint_path="triplet_best_model.pth",
@@ -181,14 +181,14 @@ def train_triplet_network(model, train_loader, val_loader, optimizer, loss_fn,
             if AMP_TRAIN:
                 with torch.amp.autocast(device_type=device, dtype=torch.float16):
                     anchor_embed, positive_embed, negative_embed = model(anchor), model(positive), model(negative)
-                    loss = loss_fn(anchor_embed, positive_embed, negative_embed)
+                    loss = criteria(anchor_embed, positive_embed, negative_embed)
                     loss = loss / accumulation_steps
                 grad_scaler.scale(loss).backward()                
                 # grad_scaler.step(optimizer)
                 # grad_scaler.update()
             else:
                 anchor_embed, positive_embed, negative_embed = model(anchor), model(positive), model(negative)
-                loss = loss_fn(anchor_embed, positive_embed, negative_embed)
+                loss = criteria(anchor_embed, positive_embed, negative_embed)
                 loss = loss / accumulation_steps  # Scale loss
                 loss.backward()
                 # optimizer.step()
@@ -205,7 +205,7 @@ def train_triplet_network(model, train_loader, val_loader, optimizer, loss_fn,
             running_loss += loss.item()* accumulation_steps
 
         avg_loss = running_loss / len(train_loader)
-        # val_acc = evaluate_triplet_network(model, loss_fn, val_loader, device=device)
+        # val_acc = evaluate_triplet_network(model, criteria, val_loader, device=device)
         val_f1, val_acc = evaluate_triplet_model(model, train_loader_normal, val_loader, device=device)
         
         # Log metrics to TensorBoard
@@ -304,7 +304,7 @@ def predict_class(model, data_loader, reference_embeddings, device=DEVICE):
 
 
 
-def evaluate_triplet_network(model, loss_fn, data_loader, device=DEVICE):
+def evaluate_triplet_network(model, criteria, data_loader, device=DEVICE):
     model.eval()
     running_loss = 0.0
 
@@ -313,7 +313,7 @@ def evaluate_triplet_network(model, loss_fn, data_loader, device=DEVICE):
             anchor, positive, negative = anchor.to(device), positive.to(device), negative.to(device)
             
             anchor_embed, positive_embed, negative_embed = model(anchor), model(positive), model(negative)
-            loss = loss_fn(anchor_embed, positive_embed, negative_embed)
+            loss = criteria(anchor_embed, positive_embed, negative_embed)
             running_loss += loss.item()
     
     avg_loss = running_loss / len(data_loader)
